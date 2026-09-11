@@ -304,47 +304,26 @@ class BitsightApiClient {
     }
 
     /**
-     * API 3: VRM Rating for entity GUID
-     * GET https://service.bitsighttech.com/customer-api/vrm/v1/companies/${entityGuid}/rating
+     * API 3: VRM Company Rating
+     * GET https://service.bitsighttech.com/customer-api/vrm/v1/companies/${bst_company_guid}/rating
      */
-    async getVendorRatings(entityGuid) {
-        if (!entityGuid || typeof entityGuid !== 'string' || !entityGuid.trim()) {
-            return { rating: null, ratingDate: '' };
+    async getVendorRatings(bstCompanyGuid) {
+        if (!bstCompanyGuid || typeof bstCompanyGuid !== 'string' || !bstCompanyGuid.trim()) {
+            return { rating: null, rating_date: '' };
         }
 
-        const url = `${this.vrmBaseUrl}/customer-api/vrm/v1/companies/${encodeURIComponent(entityGuid.trim())}/rating`;
+        const guid = encodeURIComponent(bstCompanyGuid.trim());
+        const url = `${this.vrmBaseUrl}/customer-api/vrm/v1/companies/${guid}/rating`;
+
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-            const res = await fetch(url, {
-                method: 'GET',
-                headers: this._getHeaders(),
-                signal: controller.signal,
-            });
-
-            clearTimeout(timeoutId);
-
-            if (!res.ok) {
-                return { rating: null, ratingDate: '' };
-            }
-
-            const data = await res.json();
-            const ratingNum = data.rating !== undefined && data.rating !== null
-                ? Number(data.rating)
-                : (data.current_rating !== undefined && data.current_rating !== null ? Number(data.current_rating) : null);
-
-            let ratingDate = data.rating_date || data.ratingDate || data.current_rating_date || '';
-            if (ratingDate && typeof ratingDate === 'string') {
-                ratingDate = ratingDate.split('T')[0];
-            }
-
+            const data = await this._fetch(url).catch(() => null);
+            const firstRating = data?.ratings?.[0];
             return {
-                rating: Number.isFinite(ratingNum) ? ratingNum : null,
-                ratingDate: ratingDate || '',
+                rating: firstRating?.rating !== undefined ? Number(firstRating.rating) : null,
+                rating_date: firstRating?.rating_date || '',
             };
-        } catch (err) {
-            return { rating: null, ratingDate: '' };
+        } catch {
+            return { rating: null, rating_date: '' };
         }
     }
 
@@ -578,8 +557,9 @@ class BitsightApiClient {
                 const ratingInfo = ratings[i];
                 if (ratingInfo && ratingInfo.rating !== null) {
                     item.u_rating = ratingInfo.rating;
-                    if (ratingInfo.ratingDate) {
-                        item.u_rating_date = ratingInfo.ratingDate;
+                    const rDate = ratingInfo.rating_date || ratingInfo.ratingDate;
+                    if (rDate) {
+                        item.u_rating_date = rDate;
                     }
                 }
             }
