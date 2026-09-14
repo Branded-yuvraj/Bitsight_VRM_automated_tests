@@ -311,6 +311,234 @@ function areValuesEqual(expected, actual) {
     return String(expected).trim().toLowerCase() === String(actual).trim().toLowerCase();
 }
 
+
+
+// Normalizes a domain/URL value for comparison: strips protocol, "www.",
+// trailing slash, and lowercases/trims the result.
+function normalizeDomain(value) {
+    if (!value) return '';
+    return String(value)
+        .trim()
+        .toLowerCase()
+        .replace(/^https?:\/\//, '')
+        .replace(/^www\./, '')
+        .replace(/\/+$/, '');
+}
+
+function normalizeText(value) {
+    return value ? String(value).trim().toLowerCase() : '';
+}
+
+// Fetches existing core_company records with the fields the import job
+// matches against: native name/website, plus the Bitsight vendor GUID
+// field (populated on records already linked to a Bitsight company).
+// Adjust 'website' below if the app matches against a different field.
+async function getCoreCompanyMatchFields(page) {
+    const fields = 'sys_id,name,website,x_bisit_vrm_bitsight_vendor_guid,sys_updated_on';
+    const allRecords = [];
+    const limit = 200;
+    let offset = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+        const url = `/api/now/table/core_company?sysparm_fields=${fields}` +
+            `&sysparm_limit=${limit}&sysparm_offset=${offset}`;
+        const { ok, status, body } = await snFetch(page, url);
+        if (!ok) {
+            throw new Error(`Failed to query core_company for matching (HTTP ${status}): ${JSON.stringify(body)}`);
+        }
+
+        const results = body?.result || [];
+        if (!results.length) {
+            hasMore = false;
+            break;
+        }
+
+        for (const row of results) {
+            allRecords.push({
+                sys_id: unwrapField(row.sys_id) || '',
+                name: unwrapField(row.name) || '',
+                website: unwrapField(row.website) || '',
+                bitsight_vendor_guid: unwrapField(row.x_bisit_vrm_bitsight_vendor_guid) || '',
+                sys_updated_on: unwrapField(row.sys_updated_on) || '',
+            });
+        }
+
+        if (results.length < limit) {
+            hasMore = false;
+        } else {
+            offset += limit;
+        }
+    }
+
+    return allRecords;
+}
+
+// Given the full Bitsight CM company list and the current core_company
+// records, returns:
+//   - unmatched: a Bitsight company whose guid, domain, and name all fail
+//     to match any existing core_company record.
+//   - matched: a Bitsight company that already matches an existing
+//     core_company record (used as the "still imports fine" sanity check).
+function classifyBitsightCompanies(bitsightCompanies, coreCompanyRecords) {
+    const existingGuids = new Set(
+        coreCompanyRecords.map(r => normalizeText(r.bitsight_vendor_guid)).filter(Boolean)
+    );
+    const existingDomains = new Set(
+        coreCompanyRecords.map(r => normalizeDomain(r.website)).filter(Boolean)
+    );
+    const existingNames = new Set(
+        coreCompanyRecords.map(r => normalizeText(r.name)).filter(Boolean)
+    );
+
+    let unmatched = null;
+    let matched = null;
+
+    for (const company of bitsightCompanies) {
+        const guid = normalizeText(company.guid || company.bitsight_vendor_guid);
+        const domain = normalizeDomain(company.primary_domain);
+        const name = normalizeText(company.name);
+
+        const guidHit = guid && existingGuids.has(guid);
+        const domainHit = domain && existingDomains.has(domain);
+        const nameHit = name && existingNames.has(name);
+
+        if (!unmatched && !guidHit && !domainHit && !nameHit) {
+            unmatched = company;
+        }
+        if (!matched && (guidHit || domainHit || nameHit)) {
+            matched = {
+                company,
+                coreCompanyRecord: coreCompanyRecords.find(r =>
+                    (guid && normalizeText(r.bitsight_vendor_guid) === guid) ||
+                    (domain && normalizeDomain(r.website) === domain) ||
+                    (name && normalizeText(r.name) === name)
+                ),
+            };
+        }
+
+        if (unmatched && matched) break;
+    }
+
+    return { unmatched, matched };
+}
+
+// Navigates fresh from BASE_URL to the Application Configuration screen.
+// Returns the gsft_main frame for further interaction.
+async function openApplicationConfiguration(page) {
+    await page.goto(BASE_URL);
+    await page.getByRole('menuitem', { name: 'All' }).click();
+
+    // Nudge the mouse to dismiss any overlay that pops up after this click
+    await page.mouse.move(100, 100);
+    await page.mouse.move(200, 200);
+
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+
+    await page
+        .getByRole('listitem')
+        .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
+        .getByLabel('Application Configuration 4 of')
+        .click();
+
+    return page.locator('iframe[name="gsft_main"]').contentFrame();
+}
+
+// Navigates from an already-open Application Configuration screen to the
+// Scheduled Data Imports record and clicks Execute Now.
+async function triggerScheduledImport(page, frame) {
+    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page
+        .getByRole('listitem')
+        .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
+        .getByLabel('Scheduled Data Imports 5 of')
+        .click();
+    await frame.getByRole('link', { name: 'Open record: Bitsight' }).nth(2).click();
+    await frame.getByRole('button', { name: 'Execute Now' }).click();
+}
+
+async function snMutate(page, url, method, body) {
+    return await page.evaluate(async ({ url, method, body }) => {
+        const token = window.g_ck || (window.top && window.top.g_ck) || '';
+        const headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-UserToken': token,
+        };
+        const res = await fetch(url, {
+            method,
+            credentials: 'include',
+            headers,
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        const status = res.status;
+        let responseBody = null;
+        try {
+            responseBody = await res.json();
+        } catch {
+            responseBody = null;
+        }
+        return { ok: res.ok, status, body: responseBody };
+    }, { url, method, body });
+}
+
+// Picks N random core_company records that already have a Bitsight vendor
+// GUID (i.e. previously matched/imported records), returning enough fields
+// to both delete them and verify their absence/presence afterward.
+async function getRandomCoreCompaniesWithGuid(page, count = 5, poolLimit = 50) {
+    const url = `/api/now/table/core_company?sysparm_query=x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY` +
+        `^ORDERBYDESCsys_updated_on` +
+        `&sysparm_fields=sys_id,name,website,x_bisit_vrm_bitsight_vendor_guid` +
+        `&sysparm_limit=${poolLimit}`;
+
+    const { ok, status, body } = await snFetch(page, url);
+    if (!ok) {
+        throw new Error(`Failed to query core_company pool (HTTP ${status}): ${JSON.stringify(body)}`);
+    }
+
+    const pool = (body?.result || []).map(row => ({
+        sys_id: unwrapField(row.sys_id) || '',
+        name: unwrapField(row.name) || '',
+        website: unwrapField(row.website) || '',
+        guid: unwrapField(row.x_bisit_vrm_bitsight_vendor_guid) || '',
+    })).filter(r => r.sys_id && r.guid);
+
+    const shuffled = [...pool].sort(() => 0.5 - Math.random());
+    return shuffled.slice(0, Math.min(count, shuffled.length));
+}
+
+// Deletes the given core_company records by sys_id.
+async function deleteCoreCompanyRecords(page, records) {
+    for (const record of records) {
+        const url = `/api/now/table/core_company/${record.sys_id}`;
+        const { ok, status, body } = await snMutate(page, url, 'DELETE');
+        if (!ok) {
+            throw new Error(`Failed to delete core_company ${record.sys_id} (HTTP ${status}): ${JSON.stringify(body)}`);
+        }
+        console.log(`[deleteCoreCompanyRecords] Deleted "${record.name}" (guid: ${record.guid}, sys_id: ${record.sys_id})`);
+    }
+}
+
+// Queries core_company for any of the given Bitsight GUIDs. Returns the
+// matching records (empty array if none found).
+async function findCoreCompaniesByGuid(page, guids) {
+    if (!guids.length) return [];
+
+    const guidQuery = guids.map(g => `x_bisit_vrm_bitsight_vendor_guid=${encodeURIComponent(g)}`).join('^OR');
+    const url = `/api/now/table/core_company?sysparm_query=${guidQuery}` +
+        `&sysparm_fields=sys_id,name,website,x_bisit_vrm_bitsight_vendor_guid&sysparm_limit=${guids.length}`;
+
+    const { ok, status, body } = await snFetch(page, url);
+    if (!ok) {
+        throw new Error(`Failed to query core_company by guid (HTTP ${status}): ${JSON.stringify(body)}`);
+    }
+    return body?.result || [];
+}
+
+
+
 test('TC 002 Bitsight token validation', async ({ page }) => {
     test.setTimeout(300_000);
 
@@ -489,9 +717,9 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     const expectedSnCount = totalCmCount - failedPortfoliosCount;
     console.log(`Calculation: CM Ground Truth (${totalCmCount}) - Failed (${failedPortfoliosCount}) = Expected (${expectedSnCount})`);
 
-    console.log('\n================================================================');
+    console.log('\n');
     console.log('       TIER 1: CM-ONLY COMPLETENESS RECONCILIATION SUMMARY      ');
-    console.log('================================================================');
+    
     console.table({
         'Bitsight CM Total (companies)': totalCmCount,
         'Failed Portfolios (from syslog)': failedPortfoliosCount,
@@ -571,9 +799,9 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
         });
     }
 
-    console.log('\n================================================================');
+    console.log('\n');
     console.log('       TIER 2: 15-RECORD CM SAMPLE DEEP VALIDATION REPORT       ');
-    console.log('================================================================');
+    
     console.table(sampleValidationSummary);
 
     if (sampleFieldMismatches.length > 0) {
@@ -582,7 +810,7 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     } else {
         console.log('\nAll 15 sampled records matched perfectly with CM Ground Truth.');
     }
-    console.log('================================================================\n');
+    
 
     expect.soft(
         sampleFieldMismatches.length,
@@ -1558,5 +1786,431 @@ test('TC 011 Bitsight Assessment Report - template, downloads, and filters', asy
     await backButton.click();
 });
 
+test('TC 049 Unmatched company is not inserted when Insert option is disabled', async ({ page }) => {
+    test.setTimeout(900_000);
+
+    // ---------- Step 1: navigate to Application Configuration (fresh) ----------
+    const frame = await openApplicationConfiguration(page);
+
+    // ---------- Step 2: pick and delete a handful of previously matched companies ----------
+    const recordsToDelete = await getRandomCoreCompaniesWithGuid(page, 5);
+    expect(recordsToDelete.length, 'Expected at least one core_company record with a Bitsight GUID to delete for this test').toBeGreaterThan(0);
+
+    console.log(`[TC 049] Deleting ${recordsToDelete.length} core_company record(s) to manufacture unmatched Bitsight companies...`);
+    await deleteCoreCompanyRecords(page, recordsToDelete);
+
+    const deletedGuids = recordsToDelete.map(r => r.guid);
+
+    // ---------- Step 3: set Insert option to No and save ----------
+    await frame.locator('#ins_company_n').click();
+    await frame.locator('#property_save_btn').click();
+    await page.waitForTimeout(3000);
+
+    await expect(frame.locator('#ins_company_n')).toBeChecked();
+
+    // ---------- Step 4: capture baseline import log, then trigger the job ----------
+    const baselineLogTimestamp = await getLatestImportCompleteLog(page);
+    await triggerScheduledImport(page, frame);
+
+    // ---------- Step 5: wait for the job to complete ----------
+    const importCompleted = await waitForNewImportLog(page, baselineLogTimestamp);
+    expect(importCompleted, 'Expected a new "Bitsight Portfolios Import Complete" syslog entry after triggering the job').toBeTruthy();
+
+    // ---------- Step 6: confirm none of the deleted companies were reinserted ----------
+    const reinsertedRecords = await findCoreCompaniesByGuid(page, deletedGuids);
+
+    console.log(reinsertedRecords.length === 0
+        ? `[TC 049] Confirmed: none of the ${deletedGuids.length} deleted companies were reinserted.`
+        : `[TC 049] UNEXPECTED: ${reinsertedRecords.length} deleted compan${reinsertedRecords.length === 1 ? 'y' : 'ies'} came back: ${reinsertedRecords.map(r => unwrapField(r.name)).join(', ')}`);
+
+    expect(reinsertedRecords.length, 'Expected deleted companies to stay absent from core_company when Insert option is disabled').toBe(0);
+
+    console.log('[TC 049] Test complete.');
+});
+
+test('TC 050 Unmatched company is inserted when Insert option is enabled', async ({ page }) => {
+    test.setTimeout(900_000);
+
+    // ---------- Step 1: navigate to Application Configuration (fresh) ----------
+    const frame = await openApplicationConfiguration(page);
+
+    // ---------- Step 2: pick and delete a handful of previously matched companies ----------
+    const recordsToDelete = await getRandomCoreCompaniesWithGuid(page, 5);
+    expect(recordsToDelete.length, 'Expected at least one core_company record with a Bitsight GUID to delete for this test').toBeGreaterThan(0);
+
+    console.log(`[TC 050] Deleting ${recordsToDelete.length} core_company record(s) to manufacture unmatched Bitsight companies...`);
+    await deleteCoreCompanyRecords(page, recordsToDelete);
+
+    const deletedGuids = recordsToDelete.map(r => r.guid);
+
+    // ---------- Step 3: set Insert option to Yes and save ----------
+    await frame.locator('#ins_company_y').click();
+    await frame.locator('#property_save_btn').click();
+    await page.waitForTimeout(3000);
+
+    await expect(frame.locator('#ins_company_y')).toBeChecked();
+
+    // ---------- Step 4: capture baseline import log, then trigger the job ----------
+    const baselineLogTimestamp = await getLatestImportCompleteLog(page);
+    await triggerScheduledImport(page, frame);
+
+    // ---------- Step 5: wait for the job to complete ----------
+    const importCompleted = await waitForNewImportLog(page, baselineLogTimestamp);
+    expect(importCompleted, 'Expected a new "Bitsight Portfolios Import Complete" syslog entry after triggering the job').toBeTruthy();
+
+    // ---------- Step 6: confirm all deleted companies were reinserted ----------
+    const reinsertedRecords = await findCoreCompaniesByGuid(page, deletedGuids);
+    const reinsertedGuids = new Set(reinsertedRecords.map(r => unwrapField(r.x_bisit_vrm_bitsight_vendor_guid)));
+    const missingGuids = deletedGuids.filter(g => !reinsertedGuids.has(g));
+
+    console.log(missingGuids.length === 0
+        ? `[TC 050] Confirmed: all ${deletedGuids.length} deleted companies were reinserted.`
+        : `[TC 050] UNEXPECTED: ${missingGuids.length} of ${deletedGuids.length} deleted compan${missingGuids.length === 1 ? 'y is' : 'ies are'} still missing (guids: ${missingGuids.join(', ')})`);
+
+    expect(reinsertedRecords.length, `Expected all ${deletedGuids.length} deleted companies to be reinserted when Insert option is enabled`).toBe(deletedGuids.length);
+
+    console.log('[TC 050] Test complete.');
+});
+
+test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via API for restricted user', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await page.goto(BASE_URL);
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    // ---------- Step 1: impersonate the restricted user ----------
+    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
+    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await adminMenuButton.click();
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+
+    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
+    await userCombo.click();
+    await userCombo.fill('Don Goodliffe');
+
+    // The dropdown item's id is session-generated (e.g. "980566exojol-4892-item-container"),
+    // so match on the stable "-item-container" suffix plus the visible text instead.
+    await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
+
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    
+
+    // Impersonation triggers a full page reload under the hood - if the next
+    // snFetch/snMutate call fires while that reload is still in flight, the
+    // page context gets torn down mid-evaluate ("Execution context was
+    // destroyed"). Wait for the impersonation banner to actually appear,
+    // which confirms the reload has completed and the page has settled.
+    await page.waitForLoadState('networkidle').catch(() => { });
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).waitFor({ state: 'visible', timeout: 30_000 });
+
+    // ---------- Step 2: fetch a core_company record that has a Bitsight security rating ----------
+    const listUrl = `/api/now/table/core_company?sysparm_query=x_bisit_vrm_security_ratingISNOTEMPTY` +
+        `&sysparm_fields=sys_id,name,x_bisit_vrm_security_rating&sysparm_limit=1`;
+    const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
+    expect(listOk, `Failed to fetch a core_company record (HTTP ${listStatus})`).toBeTruthy();
+
+    const records = listBody?.result || [];
+    expect(records.length, 'Expected at least one core_company record with a Bitsight security rating').toBeGreaterThan(0);
+
+    const record = records[0];
+    const sysId = unwrapField(record.sys_id);
+    const originalRating = unwrapField(record.x_bisit_vrm_security_rating);
+    console.log(`[TC 072] Target record: "${unwrapField(record.name)}" (sys_id: ${sysId}), current rating: ${originalRating}`);
+
+    // ---------- Step 3: attempt to overwrite the field via the Table API while impersonated ----------
+    const attemptedValue = String(Number(originalRating) > 0 ? Number(originalRating) - 1 : 999);
+    const updateUrl = `/api/now/table/core_company/${sysId}`;
+    const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
+        page, updateUrl, 'PATCH', { x_bisit_vrm_security_rating: attemptedValue }
+    );
+
+    console.log(`[TC 072] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 072] PATCH response body: ${JSON.stringify(updateBody)}`);
+
+    // ---------- Step 4: re-fetch the record and confirm the value did NOT change ----------
+    const { ok: recheckOk, body: recheckBody } = await snFetch(
+        page, `/api/now/table/core_company/${sysId}?sysparm_fields=x_bisit_vrm_security_rating`
+    );
+    expect(recheckOk, 'Failed to re-fetch the record after the update attempt').toBeTruthy();
+
+    const finalRating = unwrapField(recheckBody?.result?.x_bisit_vrm_security_rating);
+    console.log(`[TC 072] Rating after update attempt: ${finalRating} (was: ${originalRating}, attempted: ${attemptedValue})`);
+
+    expect(finalRating, 'Expected the Bitsight security rating to remain unchanged - field should be write-protected by ACL').toBe(originalRating);
+
+    // ---------- Step 5: end impersonation ----------
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).click();
+    await page.getByRole('button', { name: 'End impersonation' }).click();
+
+    console.log('[TC 072] Test complete.');
+});
+
+test('TC 073 Bitsight Rating and Risk Vector Alerts - Company field is write-protected via API for restricted user', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await page.goto(BASE_URL);
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    // ---------- Step 1: impersonate the restricted user ----------
+    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
+    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await adminMenuButton.click();
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+
+    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
+    await userCombo.click();
+    await userCombo.fill('Don Goodliffe');
+    await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    
+
+    // Impersonation triggers a full page reload under the hood - wait for the
+    // banner to confirm it's actually settled before touching the page again.
+    await page.waitForLoadState('networkidle').catch(() => { });
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).waitFor({ state: 'visible', timeout: 30_000 });
+
+    // ---------- Step 2: navigate to the Rating and Risk Vector Alerts list ----------
+    await page.getByRole('menuitem', { name: 'All' }).click();
+
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+    await page
+        .getByLabel('Rating and Risk Vector AlertsAlerts Received From Bitsight')
+        .getByLabel('Rating and Risk Vector Alerts 2 of')
+        .click();
+
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+    const companyColumnHeader = frame.getByRole('columnheader', { name: 'Company' });
+    await companyColumnHeader.waitFor({ state: 'visible', timeout: 30_000 });
+
+    // ---------- Step 3: fetch an alert record via the Table API ----------
+    const listUrl = `/api/now/table/x_bisit_vrm_bitsight_alerts?sysparm_fields=sys_id,company&sysparm_limit=1`;
+    const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
+    expect(listOk, `Failed to fetch a Bitsight alert record (HTTP ${listStatus})`).toBeTruthy();
+
+    const records = listBody?.result || [];
+    expect(records.length, 'Expected at least one record in the Bitsight alerts table').toBeGreaterThan(0);
+
+    const record = records[0];
+    const sysId = unwrapField(record.sys_id);
+    const originalCompany = unwrapField(record.company);
+    console.log(`[TC 073] Target alert record sys_id: ${sysId}, current company: ${JSON.stringify(originalCompany)}`);
+
+    // ---------- Step 4: attempt to overwrite the Company field via the Table API while impersonated ----------
+    const updateUrl = `/api/now/table/x_bisit_vrm_bitsight_alerts/${sysId}`;
+    const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
+        page, updateUrl, 'PATCH', { company: '' }
+    );
+
+    console.log(`[TC 073] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 073] PATCH response body: ${JSON.stringify(updateBody)}`);
+
+    // The API call itself succeeds (200) even though the ACL silently blocks
+    // the actual field write - documenting this explicitly so it's clear this
+    // is a "soft" no-op denial, not a hard 403 rejection.
+    expect(updateStatus, 'Expected the Table API PATCH request itself to succeed (200) - the ACL denial is a silent no-op, not a request-level rejection').toBe(200);
+    expect(updateOk, 'Expected the Table API PATCH response to report ok').toBeTruthy();
+
+    // ---------- Step 5: re-fetch the record and confirm the Company value did NOT change ----------
+    const { ok: recheckOk, body: recheckBody } = await snFetch(
+        page, `/api/now/table/x_bisit_vrm_bitsight_alerts/${sysId}?sysparm_fields=company`
+    );
+    expect(recheckOk, 'Failed to re-fetch the alert record after the update attempt').toBeTruthy();
+
+    const finalCompany = unwrapField(recheckBody?.result?.company);
+    console.log(`[TC 073] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
+
+    expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
+
+    // ---------- Step 6: end impersonation ----------
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).click();
+    await page.getByRole('button', { name: 'End impersonation' }).click();
+
+    console.log('[TC 073] Test complete.');
+});
 
 
+test('TC 074 Bitsight Incidents - Company field is write-protected via API for restricted user', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await page.goto(BASE_URL);
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    // ---------- Step 1: impersonate the restricted user ----------
+    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
+    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await adminMenuButton.click();
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+
+    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
+    await userCombo.click();
+    await userCombo.fill('Don Goodliffe');
+    await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+   
+
+    // Impersonation triggers a full page reload under the hood - wait for the
+    // banner to confirm it's actually settled before touching the page again.
+    await page.waitForLoadState('networkidle').catch(() => { });
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).waitFor({ state: 'visible', timeout: 30_000 });
+
+    // ---------- Step 2: navigate to the Incidents list ----------
+    await page.getByRole('menuitem', { name: 'All' }).click();
+
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+    await page.getByRole('link', { name: 'Incidents 3 of' }).click();
+
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+    const companyColumnHeader = frame.getByRole('columnheader', { name: 'Company' });
+    await companyColumnHeader.waitFor({ state: 'visible', timeout: 30_000 });
+
+    // ---------- Step 3: fetch a Bitsight-related incident via the Table API ----------
+    // Standard ServiceNow incident table, filtered to incidents whose short
+    // description references Bitsight.
+    const listUrl = `/api/now/table/incident?sysparm_query=short_descriptionLIKEbitsight` +
+        `&sysparm_fields=sys_id,company,short_description&sysparm_limit=1`;
+    const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
+    expect(listOk, `Failed to fetch a Bitsight-related incident (HTTP ${listStatus})`).toBeTruthy();
+
+    const records = listBody?.result || [];
+    expect(records.length, 'Expected at least one incident with "bitsight" in the short description').toBeGreaterThan(0);
+
+    const record = records[0];
+    const sysId = unwrapField(record.sys_id);
+    const originalCompany = unwrapField(record.company);
+    console.log(`[TC 074] Target incident: "${unwrapField(record.short_description)}" (sys_id: ${sysId}), current company: ${JSON.stringify(originalCompany)}`);
+
+    // ---------- Step 4: attempt to overwrite the Company field via the Table API while impersonated ----------
+    const updateUrl = `/api/now/table/incident/${sysId}`;
+    const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
+        page, updateUrl, 'PATCH', { company: '' }
+    );
+
+    console.log(`[TC 074] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 074] PATCH response body: ${JSON.stringify(updateBody)}`);
+
+    // The API call itself is expected to succeed (200) even though the ACL
+    // silently blocks the actual field write - a soft no-op, not a hard
+    // 403 rejection (consistent with the Alerts table behavior in TC-073).
+    expect(updateStatus, 'Expected the Table API PATCH request itself to succeed (200) - the ACL denial is a silent no-op, not a request-level rejection').toBe(200);
+    expect(updateOk, 'Expected the Table API PATCH response to report ok').toBeTruthy();
+
+    // ---------- Step 5: re-fetch the record and confirm the Company value did NOT change ----------
+    const { ok: recheckOk, body: recheckBody } = await snFetch(
+        page, `/api/now/table/incident/${sysId}?sysparm_fields=company`
+    );
+    expect(recheckOk, 'Failed to re-fetch the incident record after the update attempt').toBeTruthy();
+
+    const finalCompany = unwrapField(recheckBody?.result?.company);
+    console.log(`[TC 074] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
+
+    expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
+
+    // ---------- Step 6: end impersonation ----------
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).click();
+    await page.getByRole('button', { name: 'End impersonation' }).click();
+
+    console.log('[TC 074] Test complete.');
+});
+
+test('TC 075 Bitsight Dashboard - permission-denied message shown for restricted user', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await page.goto(BASE_URL);
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    // ---------- Step 1: impersonate the restricted user ----------
+    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
+    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await adminMenuButton.click();
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+
+    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
+    await userCombo.click();
+    await userCombo.fill('Don Goodliffe');
+    await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    
+
+    // Impersonation triggers a full page reload under the hood - wait for the
+    // banner to confirm it's actually settled before touching the page again.
+    await page.waitForLoadState('networkidle').catch(() => { });
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).waitFor({ state: 'visible', timeout: 30_000 });
+
+    // ---------- Step 2: navigate to the Dashboard via search ----------
+    await page.getByRole('menuitem', { name: 'All' }).click();
+
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+
+    await page
+        .getByRole('link', { name: 'Dashboard 4 of' })
+        .click();
+
+    // ---------- Step 3: confirm the permission-denied message is shown ----------
+    const permissionDeniedMessage = page.getByRole('heading', { name: 'You do not have permission to' });
+    await expect(permissionDeniedMessage, 'Expected the permission-denied message to be visible for the restricted user').toBeVisible({ timeout: 30_000 });
+
+    console.log('[TC 075] Confirmed: permission-denied message is shown for the restricted user on the Dashboard.');
+
+    // ---------- Step 4: end impersonation ----------
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).click();
+    await page.getByRole('button', { name: 'End impersonation' }).click();
+
+    console.log('[TC 075] Test complete.');
+});
+
+test('TC 076 & 077 Bitsight - Application Configuration and Scheduled Data Imports hidden from restricted user', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await page.goto(BASE_URL);
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    // ---------- Step 1: impersonate the restricted user ----------
+    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
+    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await adminMenuButton.click();
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+
+    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
+    await userCombo.click();
+    await userCombo.fill('Don Goodliffe');
+    await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
+    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    
+
+    // Impersonation triggers a full page reload under the hood - wait for the
+    // banner to confirm it's actually settled before touching the page again.
+    await page.waitForLoadState('networkidle').catch(() => { });
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).waitFor({ state: 'visible', timeout: 30_000 });
+
+    // ---------- Step 2: search for "bitsight" ----------
+    await page.getByRole('menuitem', { name: 'All' }).click();
+
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+
+    const bitsightListItem = page
+        .getByRole('listitem')
+        .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' });
+
+    // ---------- Step 3: confirm the admin-only entries are not visible ----------
+    const applicationConfigLink = bitsightListItem.getByLabel('Application Configuration 4 of');
+    const scheduledImportsLink = bitsightListItem.getByLabel('Scheduled Data Imports 5 of');
+
+    await expect(applicationConfigLink, 'Expected "Application Configuration" to not be visible to a restricted user').not.toBeVisible();
+    await expect(scheduledImportsLink, 'Expected "Scheduled Data Imports" to not be visible to a restricted user').not.toBeVisible();
+
+    console.log('[TC 076 & 077] Confirmed: Application Configuration and Scheduled Data Imports are hidden from the restricted user.');
+
+    // ---------- Step 4: end impersonation ----------
+    await page.getByRole('button', { name: 'Don Goodliffe: Available' }).click();
+    await page.getByRole('button', { name: 'End impersonation' }).click();
+
+    console.log('[TC 076 & 077] Test complete.');
+});
