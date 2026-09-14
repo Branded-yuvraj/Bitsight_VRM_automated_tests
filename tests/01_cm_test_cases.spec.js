@@ -2,6 +2,8 @@ import { test, expect, request } from '@playwright/test';
 
 const BASE_URL = process.env.SN_URL;
 const COMPLETE_MESSAGE = 'Bitsight Portfolios Import Complete';
+const { BitsightApiClient } = require('./utils/bitsight-api-client'); // adjust path as needed
+const {ServiceNowApiClient} = require('./utils/servicenow-api-client'); // adjust path as needed
 
 // ---- Session-authenticated fetch helper (runs inside the browser context) ----
 
@@ -136,7 +138,178 @@ async function getSingleCompanyRecord(page, guidField, fieldNames, baselineIso) 
         fresh: false,
     };
 }
+function unwrapField(val) {
+    return (val && typeof val === 'object' && val.value !== undefined) ? val.value : val;
+}
 
+// Tier 1 Completeness Query: full-population GUIDs from core_company.
+// Does NOT filter by sys_updated_on.
+async function getBitsightVendorGuids(page) {
+    const allGuids = [];
+    const limit = 200;
+    let offset = 0;
+    let hasMore = true;
+
+    console.log('[getBitsightVendorGuids] Fetching full-population Bitsight GUIDs from core_company (session token)...');
+
+    while (hasMore) {
+        const url = `/api/now/table/core_company?sysparm_query=x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY` +
+            `^ORDERBYDESCsys_updated_on` +
+            `&sysparm_fields=sys_id,x_bisit_vrm_bitsight_vendor_guid` +
+            `&sysparm_limit=${limit}&sysparm_offset=${offset}`;
+
+        const { ok, status, body } = await snFetch(page, url);
+        if (!ok) {
+            throw new Error(`Failed to query core_company GUIDs (HTTP ${status}): ${JSON.stringify(body)}`);
+        }
+
+        const results = body?.result || [];
+        if (!results.length) {
+            hasMore = false;
+            break;
+        }
+
+        for (const row of results) {
+            const guid = unwrapField(row.x_bisit_vrm_bitsight_vendor_guid) || '';
+            const sysId = unwrapField(row.sys_id) || '';
+            if (guid) {
+                allGuids.push({ sys_id: sysId, guid: String(guid).trim() });
+            }
+        }
+
+        if (results.length < limit) {
+            hasMore = false;
+        } else {
+            offset += limit;
+        }
+    }
+
+    console.log(`[getBitsightVendorGuids] Retrieved ${allGuids.length} total Bitsight GUIDs from core_company.`);
+    return allGuids;
+}
+
+// Tier 2 Sample Query: random N records from recently updated core_company records.
+async function getRandomRecentlyUpdatedCoreCompanies(page, sampleSize = 15, poolLimit = 50) {
+    console.log(`[getRandomRecentlyUpdatedCoreCompanies] Fetching pool of up to ${poolLimit} recently updated core_company records...`);
+
+    const fields = [
+        'x_bisit_vrm_risk_score',
+        'x_bisit_vrm_due_date',
+        'x_bisit_vrm_is_managed',
+        'x_bisit_vrm_company_name',
+        'x_bisit_vrm_is_vrm',
+        'x_bisit_vrm_primary_domain',
+        'x_bisit_vrm_bitsight_rating_category',
+        'x_bisit_vrm_bitsight_vendor_guid',
+        'x_bisit_vrm_life_cycle_stage_name',
+        'x_bisit_vrm_security_rating',
+        'x_bisit_vrm_impact_score',
+        'x_bisit_vrm_trust_score',
+        'x_bisit_vrm_vendor_guid',
+        'x_bisit_vrm_rating_date',
+        'sys_id',
+    ].join(',');
+
+    const url = `/api/now/table/core_company?sysparm_query=x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY` +
+        `^ORDERBYDESCsys_updated_on` +
+        `&sysparm_fields=${fields}` +
+        `&sysparm_limit=${poolLimit}`;
+
+    const { ok, status, body } = await snFetch(page, url);
+    if (!ok) {
+        throw new Error(`Failed to query recently updated core_company records (HTTP ${status}): ${JSON.stringify(body)}`);
+    }
+
+    const results = body?.result || [];
+    console.log(`[getRandomRecentlyUpdatedCoreCompanies] Retrieved pool of ${results.length} recently updated core_company records.`);
+
+    if (!results.length) return [];
+
+    const shuffled = [...results].sort(() => 0.5 - Math.random());
+    const selected = shuffled.slice(0, Math.min(sampleSize, shuffled.length));
+
+    console.log(`[getRandomRecentlyUpdatedCoreCompanies] Randomly selected ${selected.length} records for Tier 2 field validation.`);
+
+    return selected.map(row => {
+        const normalized = {};
+        for (const key of Object.keys(row)) {
+            normalized[key] = unwrapField(row[key]);
+        }
+        return normalized;
+    });
+}
+
+// Extracts the failed portfolios count from syslog message matching
+// 'There were {N} failed portfolios.' between baseline and completion.
+async function getFailedPortfoliosCount(page, options = {}) {
+    const { baselineTimestamp, completionTimestamp } = options;
+    const baselineSnDate = baselineTimestamp ? toSnDateTime(baselineTimestamp) : '';
+    const completionSnDate = completionTimestamp ? toSnDateTime(completionTimestamp) : '';
+
+    let query = `sourceSTARTSWITHx_bisit^messageLIKEfailed portfolios`;
+    if (baselineSnDate) {
+        query += `^sys_created_on>=${baselineSnDate}`;
+    }
+    if (completionSnDate) {
+        query += `^sys_created_on<=${completionSnDate}`;
+    }
+    query += `^ORDERBYDESCsys_created_on`;
+
+    const url = `/api/now/table/syslog?sysparm_query=${query}&sysparm_fields=message,sys_created_on&sysparm_limit=50`;
+    const { ok, body } = await snFetch(page, url);
+
+    if (ok && body?.result?.length) {
+        for (const entry of body.result) {
+            const match = String(entry.message || '').match(/There were\s+(\d+)\s+failed portfolios/i);
+            if (match) {
+                const count = parseInt(match[1], 10);
+                console.log(`[getFailedPortfoliosCount] Found syslog failure summary: "${entry.message}" -> failedCount = ${count}`);
+                return count;
+            }
+        }
+    }
+
+    console.log('[getFailedPortfoliosCount] No failure summary found in syslog - assuming 0 failed portfolios.');
+    return 0;
+}
+// Generic loose-equality comparator for ground-truth vs ServiceNow field values.
+// Treats null/undefined/'' as equivalent, compares numbers numerically,
+// booleans leniently (true/'true'/1/'1'), dates by their date-only portion,
+// and everything else as trimmed, case-insensitive strings.
+function areValuesEqual(expected, actual) {
+    const isEmpty = (v) => v === undefined || v === null || v === '';
+
+    if (isEmpty(expected) && isEmpty(actual)) {
+        return true;
+    }
+    if (isEmpty(expected) || isEmpty(actual)) {
+        return false;
+    }
+
+    // Boolean-ish values
+    const boolLike = (v) => typeof v === 'boolean' || v === 'true' || v === 'false' || v === 1 || v === 0 || v === '1' || v === '0';
+    if (boolLike(expected) && boolLike(actual)) {
+        const toBool = (v) => v === true || v === 'true' || v === 1 || v === '1';
+        return toBool(expected) === toBool(actual);
+    }
+
+    // Numeric values
+    const expNum = Number(expected);
+    const actNum = Number(actual);
+    if (!Number.isNaN(expNum) && !Number.isNaN(actNum) && expected !== '' && actual !== '') {
+        return expNum === actNum;
+    }
+
+    // Date-like strings ("yyyy-MM-dd HH:mm:ss" or ISO) - compare date-only portion
+    const dateLike = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v);
+    if (dateLike(expected) && dateLike(actual)) {
+        const dateOnly = (v) => v.split('T')[0].split(' ')[0];
+        return dateOnly(expected) === dateOnly(actual);
+    }
+
+    // Fallback: trimmed, case-insensitive string comparison
+    return String(expected).trim().toLowerCase() === String(actual).trim().toLowerCase();
+}
 
 test('TC 002 Bitsight token validation', async ({ page }) => {
     test.setTimeout(300_000);
@@ -189,7 +362,15 @@ test('TC 002 Bitsight token validation', async ({ page }) => {
 });
 
 test('TC 003 Bitsight import data validation', async ({ page }) => {
-    test.setTimeout(600_000);
+    test.setTimeout(1_800_000); // extended for full import + CM ground truth reconciliation
+
+    // CM-only: force CM_TOKEN explicitly so this never falls back to
+    // CMVRM_TOKEN / BITSIGHT_API_TOKEN, and never touches VRM endpoints.
+    const cmToken = process.env.CM_TOKEN;
+    expect(cmToken, 'CM_TOKEN must be set in the environment to run CM ground truth reconciliation').toBeTruthy();
+
+    const bitsightClient = new BitsightApiClient({ token: cmToken });
+
     await page.goto(BASE_URL);
     await page.getByRole('menuitem', { name: 'All' }).click();
 
@@ -216,6 +397,8 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     await frame.locator('[id="sys_display.caller"]').fill('Abel Tutor');
     await frame.locator('#property_save_btn').click();
 
+    await page.waitForTimeout(3000);
+
     // ---------- Step 2: trigger the scheduled import ----------
     await page.getByRole('menuitem', { name: 'All' }).click();
     await page
@@ -234,6 +417,10 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     const importCompleted = await waitForNewImportLog(page, baselineLogTimestamp);
     expect(importCompleted, 'Expected a new "Bitsight Portfolios Import Complete" syslog entry after triggering the job').toBeTruthy();
 
+    // Capture the actual completion timestamp (needed for the failed-portfolios
+    // syslog lookup below) - re-reads the same newest entry just confirmed.
+    const completionTimestamp = await getLatestImportCompleteLog(page);
+
     // ---------- Step 4: discover actual Bitsight field names on core_company ----------
     const bitsightFields = await getBitsightFieldNames(page);
     expect(bitsightFields.length, 'Expected to find Bitsight fields in sys_dictionary for core_company').toBeGreaterThan(0);
@@ -250,7 +437,7 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     const record = records[0];
     console.log(fresh
         ? `\n--- Validating a record updated during THIS run (sys_id: ${record.sys_id ?? '(not fetched)'}) ---`
-        : `\n--- No changes this run (no-op sync) — validating an existing populated record instead (sys_id: ${record.sys_id ?? '(not fetched)'}) ---`
+        : `\n--- No changes this run (no-op sync) - validating an existing populated record instead (sys_id: ${record.sys_id ?? '(not fetched)'}) ---`
     );
 
     const criticalLabels = ['Bitsight vendor GUID', 'Bitsight company name', 'Bitsight security rating'];
@@ -269,6 +456,138 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
 
         expect(val, `Expected "${field.label}" to be populated on imported record`).toBeTruthy();
     }
+
+    // ---------- Step 6: fetch Bitsight ground truth (CM companies only, no VRM calls) ----------
+    console.log('\n=== Step 6: Fetching Bitsight Ground Truth (CM Companies Only) ===');
+    const rawCompanies = await bitsightClient.getCompanies();
+    const groundTruthCompanies = bitsightClient.normalizeMergedPortfolio(rawCompanies);
+
+    const portfolioMap = new Map();
+    for (const item of groundTruthCompanies) {
+        if (item.bitsight_vendor_guid) {
+            portfolioMap.set(item.bitsight_vendor_guid, item);
+        }
+    }
+
+    const totalCmCount = groundTruthCompanies.length;
+    console.log(`Bitsight Ground Truth CM Company Count: ${totalCmCount}`);
+
+    // ---------- Step 7: fetch full ServiceNow core_company GUIDs count (session token) ----------
+    console.log('\n=== Step 7: Fetching ServiceNow core_company GUIDs Count ===');
+    const snGuidsList = await getBitsightVendorGuids(page);
+    const snTotalCount = snGuidsList.length;
+    console.log(`ServiceNow core_company Bitsight record count: ${snTotalCount}`);
+
+    // ---------- Step 8: extract failed portfolios count from syslog (session token) ----------
+    console.log('\n=== Step 8: Extracting Failed Portfolios Count from syslog ===');
+    const failedPortfoliosCount = await getFailedPortfoliosCount(page, {
+        baselineTimestamp: baselineLogTimestamp,
+        completionTimestamp,
+    });
+    console.log(`Failed Portfolios Count from syslog: ${failedPortfoliosCount}`);
+
+    const expectedSnCount = totalCmCount - failedPortfoliosCount;
+    console.log(`Calculation: CM Ground Truth (${totalCmCount}) - Failed (${failedPortfoliosCount}) = Expected (${expectedSnCount})`);
+
+    console.log('\n================================================================');
+    console.log('       TIER 1: CM-ONLY COMPLETENESS RECONCILIATION SUMMARY      ');
+    console.log('================================================================');
+    console.table({
+        'Bitsight CM Total (companies)': totalCmCount,
+        'Failed Portfolios (from syslog)': failedPortfoliosCount,
+        'Expected ServiceNow Count (CM - Failed)': expectedSnCount,
+        'Actual ServiceNow Count (core_company)': snTotalCount,
+        'Difference': Math.abs(snTotalCount - expectedSnCount),
+    });
+
+    expect.soft(
+        snTotalCount,
+        `Expected ServiceNow core_company count (${snTotalCount}) to match CM Ground Truth minus failed portfolios (${totalCmCount} - ${failedPortfoliosCount} = ${expectedSnCount})`
+    ).toBe(expectedSnCount);
+
+    // ---------- Step 9: sample 15 random recently updated records (session token) ----------
+    console.log('\n=== Step 9: Fetching 15 Random Recently Updated Records from ServiceNow ===');
+    const sampleRecords = await getRandomRecentlyUpdatedCoreCompanies(page, 15, 50);
+    expect(sampleRecords.length, 'Expected to retrieve sampled records from ServiceNow').toBeGreaterThan(0);
+
+    // ---------- Step 10: field-by-field validation against CM ground truth ----------
+    console.log('\n=== Step 10: Validating Sampled Records Field-by-Field against CM Ground Truth ===');
+    const sampleFieldMismatches = [];
+    const sampleValidationSummary = [];
+
+    // CM-only fields. VRM-specific fields (impact_score, risk_score,
+    // trust_score, due_date, vendor_guid, is_managed, life_cycle_stage_name)
+    // are intentionally NOT checked in this test.
+    const fieldsToCheck = [
+        { key: 'name', snKey: 'x_bisit_vrm_company_name' },
+        { key: 'primary_domain', snKey: 'x_bisit_vrm_primary_domain' },
+        { key: 'rating', snKey: 'x_bisit_vrm_security_rating' },
+        { key: 'rating_date', snKey: 'x_bisit_vrm_rating_date' },
+        { key: 'u_is_vrm', snKey: 'x_bisit_vrm_is_vrm' },
+    ];
+
+    for (const actual of sampleRecords) {
+        const guid = actual.x_bisit_vrm_bitsight_vendor_guid;
+        const expected = portfolioMap.get(guid);
+
+        if (!expected) {
+            sampleFieldMismatches.push({
+                vendorGuid: guid,
+                companyName: actual.x_bisit_vrm_company_name,
+                field: 'Record Existence in Ground Truth',
+                expected: 'Present in Bitsight CM Companies',
+                actual: 'Not Found in Bitsight CM Companies',
+            });
+            continue;
+        }
+
+        let recordMismatches = 0;
+
+        for (const f of fieldsToCheck) {
+            const expVal = expected[f.key] !== undefined ? expected[f.key] : expected[f.snKey];
+            const actVal = actual[f.snKey];
+
+            const matches = areValuesEqual(expVal, actVal);
+
+            if (!matches) {
+                recordMismatches++;
+                sampleFieldMismatches.push({
+                    vendorGuid: guid,
+                    companyName: actual.x_bisit_vrm_company_name || expected.name,
+                    field: f.snKey,
+                    expected: expVal,
+                    actual: actVal,
+                });
+            }
+        }
+
+        sampleValidationSummary.push({
+            guid,
+            name: actual.x_bisit_vrm_company_name || expected.name,
+            is_vrm: false,
+            fieldsChecked: fieldsToCheck.length,
+            mismatches: recordMismatches,
+            status: recordMismatches === 0 ? 'MATCH' : 'MISMATCH',
+        });
+    }
+
+    console.log('\n================================================================');
+    console.log('       TIER 2: 15-RECORD CM SAMPLE DEEP VALIDATION REPORT       ');
+    console.log('================================================================');
+    console.table(sampleValidationSummary);
+
+    if (sampleFieldMismatches.length > 0) {
+        console.log('\n--- SAMPLE FIELD MISMATCHES ---');
+        console.table(sampleFieldMismatches);
+    } else {
+        console.log('\nAll 15 sampled records matched perfectly with CM Ground Truth.');
+    }
+    console.log('================================================================\n');
+
+    expect.soft(
+        sampleFieldMismatches.length,
+        `Expected 0 field mismatches in 15-record CM sample, but found ${sampleFieldMismatches.length}. Mismatches: ${JSON.stringify(sampleFieldMismatches, null, 2)}`
+    ).toBe(0);
 });
 
 
@@ -1238,4 +1557,6 @@ test('TC 011 Bitsight Assessment Report - template, downloads, and filters', asy
     await backButton.waitFor({ state: 'visible', timeout: 30_000 });
     await backButton.click();
 });
+
+
 
