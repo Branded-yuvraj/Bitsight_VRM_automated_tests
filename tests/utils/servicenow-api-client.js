@@ -93,43 +93,67 @@ class ServiceNowApiClient {
      * Authoritative Precondition Check:
      * Query the user_subscription_type system property to verify it equals '3'
      */
-    async getSubscriptionTypeProperty() {
-        try {
-            const url = `/api/now/table/sys_properties?sysparm_query=name=x_bisit_vrm.user_subscription_type^ORname=user_subscription_type` +
-                `&sysparm_fields=name,value&sysparm_limit=5`;
+    // async getSubscriptionTypeProperty() {
+    //     try {
+    //         const url = `/api/now/table/sys_properties?sysparm_query=name=x_bisit_vrm.user_subscription_type^ORname=user_subscription_type` +
+    //             `&sysparm_fields=name,value&sysparm_limit=5`;
 
-            const { ok, body } = await this._fetch(url);
-            if (ok && body?.result?.length > 0) {
-                const prop = body.result.find(p => p.name === 'x_bisit_vrm.user_subscription_type') || body.result[0];
-                return prop?.value ? String(prop.value).trim() : null;
-            }
-        } catch (err) {
-            console.warn(`[ServiceNowAPI] Note: sys_properties REST query not accessible: ${err.message}`);
-        }
+    //         const { ok, body } = await this._fetch(url);
+    //         if (ok && body?.result?.length > 0) {
+    //             const prop = body.result.find(p => p.name === 'x_bisit_vrm.user_subscription_type') || body.result[0];
+    //             return prop?.value ? String(prop.value).trim() : null;
+    //         }
+    //     } catch (err) {
+    //         console.warn(`[ServiceNowAPI] Note: sys_properties REST query not accessible: ${err.message}`);
+    //     }
 
-        return null;
-    }
+    //     return null;
+    // }
 
     /**
-     * Retrieve the latest completion log timestamp BEFORE triggering the import.
-     * Used as a baseline so we only accept completions generated after this point.
+     * Retrieve the latest log timestamp from syslog matching a specific message.
+     * Supports:
+     * - getLatestLogByMessage(message)
+     * - getLatestLogByMessage(page, message)
+     * - getLatestLogByMessage({ message, ... })
      */
-    async getLatestImportCompleteLog() {
-        const query = `sourceSTARTSWITHx_bisit^messageLIKE${this.importCompleteMessage}^ORDERBYDESCsys_created_on`;
+    async getLatestLogByMessage(pageOrMessageOrOptions, maybeMessage) {
+        let message = '';
+        if (typeof pageOrMessageOrOptions === 'string') {
+            message = pageOrMessageOrOptions;
+        } else if (typeof maybeMessage === 'string') {
+            message = maybeMessage;
+        } else if (pageOrMessageOrOptions && typeof pageOrMessageOrOptions === 'object') {
+            message = pageOrMessageOrOptions.message || pageOrMessageOrOptions.logMessage || pageOrMessageOrOptions.completeMessage || '';
+        }
+
+        if (!message) {
+            message = this.importCompleteMessage;
+        }
+
+        const query = `sourceSTARTSWITHx_bisit^messageLIKE${message}^ORDERBYDESCsys_created_on`;
         const { ok, body } = await this._queryLogs(query, 'message,sys_created_on', 1);
 
         if (!ok || !body?.result?.length) {
-            console.log('[ServiceNowAPI] No prior completion log found in syslog — baseline timestamp is null.');
+            console.log(`[ServiceNowAPI] No prior log found in syslog for message "${message}" — baseline timestamp is null.`);
             return null;
         }
 
         const entry = body.result[0];
-        console.log(`[ServiceNowAPI] Baseline completion log found: "${entry.message}" at ${entry.sys_created_on}`);
+        console.log(`[ServiceNowAPI] Baseline log found for "${message}": at ${entry.sys_created_on}`);
         return entry.sys_created_on;
     }
 
     /**
+     * Alias for backward compatibility with portfolio import tests
+     */
+    async getLatestImportCompleteLog(pageOrMessageOrOptions, maybeMessage) {
+        return await this.getLatestLogByMessage(pageOrMessageOrOptions, maybeMessage);
+    }
+
+    /**
      * Poll syslog until a new import completion log appears strictly after the baseline.
+     * Supports checking custom completion messages passed via options.logMessage / options.completeMessage / options.message.
      */
     async waitForImportCompletion(pageOrOptions, maybeOptions = {}) {
         const options = (pageOrOptions && typeof pageOrOptions === 'object' && !pageOrOptions.goto)
@@ -139,7 +163,7 @@ class ServiceNowApiClient {
         const baselineTimestamp = options.baselineTimestamp;
         const timeoutMs = options.timeoutMs || 300_000;
         const pollMs = options.pollIntervalMs || 15_000;
-        const completeMsg = options.completeMessage || this.importCompleteMessage;
+        const completeMsg = options.logMessage || options.completeMessage || options.message || this.importCompleteMessage;
 
         const deadline = Date.now() + timeoutMs;
         const baselineEpoch = toEpoch(baselineTimestamp);
@@ -147,7 +171,7 @@ class ServiceNowApiClient {
 
         const query = `sourceSTARTSWITHx_bisit^messageLIKE${completeMsg}^ORDERBYDESCsys_created_on`;
 
-        console.log(`[ServiceNowAPI] Polling syslog for completion log newer than baseline (${baselineTimestamp || 'none'})...`);
+        console.log(`[ServiceNowAPI] Polling syslog for completion log "${completeMsg}" newer than baseline (${baselineTimestamp || 'none'})...`);
 
         while (Date.now() < deadline) {
             attempt++;
@@ -163,7 +187,7 @@ class ServiceNowApiClient {
                 }
                 console.log(`[ServiceNowAPI] (Attempt ${attempt}) Latest log (${body.result[0].sys_created_on}) is not newer than baseline (${baselineTimestamp || 'none'}). Waiting...`);
             } else if (ok) {
-                console.log(`[ServiceNowAPI] (Attempt ${attempt}) No completion log found yet in syslog. Waiting...`);
+                console.log(`[ServiceNowAPI] (Attempt ${attempt}) No completion log found yet in syslog for "${completeMsg}". Waiting...`);
             } else {
                 console.warn(`[ServiceNowAPI] syslog query returned HTTP ${status}`);
             }
@@ -171,13 +195,12 @@ class ServiceNowApiClient {
             await new Promise((r) => setTimeout(r, pollMs));
         }
 
-        throw new Error(`Timed out after ${timeoutMs}ms waiting for Bitsight import completion syslog entry.`);
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for Bitsight import completion log "${completeMsg}".`);
     }
 
     /**
      * Tier 1 Completeness Query:
      * Fast, lightweight query retrieving ONLY sys_id and x_bisit_vrm_bitsight_vendor_guid across the entire table.
-     * Does NOT filter by sys_updated_on.
      */
     async getBitsightVendorGuids() {
         const allGuids = [];
@@ -398,6 +421,81 @@ class ServiceNowApiClient {
     }
 
     /**
+     * Extracts individual failed company records from syslog using the scoped failure query.
+     * Supports timestamp scoping via baselineTimestamp/sinceTimestamp and completionTimestamp.
+     */
+    async getFailedImportCompanies(options = {}) {
+        let query = options.query || options.sysparm_query;
+
+        if (!query) {
+            const { baselineTimestamp, sinceTimestamp, completionTimestamp } = options;
+            const startTimestamp = sinceTimestamp || baselineTimestamp;
+            const startSnDate = startTimestamp ? toSnDateTime(startTimestamp) : null;
+            const endSnDate = completionTimestamp ? toSnDateTime(completionTimestamp) : null;
+
+            const baseFilter = 'sys_scope=39896b4c3bf21290f74c563a85e45a88^messageSTARTSWITHFailed to import company:';
+
+            if (startSnDate) {
+                query = `sys_created_on>=${startSnDate}^` + baseFilter;
+            } else {
+                query = 'sys_created_onONToday@javascript:gs.beginningOfToday()@javascript:gs.endOfToday()^' + baseFilter;
+            }
+
+            if (endSnDate) {
+                query += `^sys_created_on<=${endSnDate}`;
+            }
+
+            query += '^ORDERBYDESCsys_created_on';
+        }
+
+        const fields = options.fields || 'message,sys_created_on,level,sys_id';
+        const limit = options.limit || 200;
+
+        console.log(`[ServiceNowAPI] Fetching failed import company logs from syslog with query: ${query}`);
+        const { ok, status, body } = await this._queryLogs(query, fields, limit);
+
+        if (!ok) {
+            console.warn(`[ServiceNowAPI] Failed to fetch failed company logs (HTTP ${status})`);
+            return [];
+        }
+
+        const results = body?.result || [];
+        const failedCompanies = [];
+
+        for (const entry of results) {
+            const msg = entry.message || '';
+            // Example: Failed to import company: Zoom Video Communications (Vendor GUID: 6fdcbcaf-06cf-46d9-a1cd-29e089fd86a6) - Error: Lifecycle stage not found.
+            const companyMatch = msg.match(/Failed to import company:\s*(.*?)\s*\(Vendor GUID:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)(?:\s*-\s*Error:\s*(.*))?/i);
+            if (companyMatch) {
+                const companyName = companyMatch[1]?.trim();
+                const vendorGuid = companyMatch[2]?.trim();
+                const error = companyMatch[3]?.trim() || '';
+                failedCompanies.push({
+                    companyName,
+                    vendorGuid,
+                    error,
+                    message: msg,
+                    sys_created_on: entry.sys_created_on,
+                });
+            } else {
+                const guidMatch = msg.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+                if (guidMatch) {
+                    failedCompanies.push({
+                        companyName: '',
+                        vendorGuid: guidMatch[0].trim(),
+                        error: msg,
+                        message: msg,
+                        sys_created_on: entry.sys_created_on,
+                    });
+                }
+            }
+        }
+
+        console.log(`[ServiceNowAPI] Parsed ${failedCompanies.length} failed company log entries from syslog.`);
+        return failedCompanies;
+    }
+
+    /**
      * Transform-Level Failure Tracking:
      * 1. Identifies import set batch created after baselineTriggerTimestamp.
      * 2. Queries staging table (x_bisit_vrm_portfolio_import) for sys_import_state.
@@ -569,6 +667,138 @@ class ServiceNowApiClient {
             u_is_vrm: isVrm,
             raw,
         };
+    }
+
+    /**
+     * Generic query for any ServiceNow table records
+     * GET /api/now/table/{tableName}
+     * Supports options as object or string query: getTableRecords('incident', 'short_descriptionLIKEbitsight')
+     */
+    async getTableRecords(tableName, optionsOrQuery = {}) {
+        const options = typeof optionsOrQuery === 'string' ? { query: optionsOrQuery } : (optionsOrQuery || {});
+        const allRecords = [];
+        const limit = options.limit || 200;
+        let offset = options.offset || 0;
+        const query = options.query || options.sysparm_query || '';
+        const fields = options.fields || options.sysparm_fields || '';
+        let hasMore = true;
+
+        console.log(`[ServiceNowAPI] Fetching records from table "${tableName}"${query ? ` with query "${query}"` : ''}...`);
+
+        while (hasMore) {
+            const queryParts = [];
+            if (query) queryParts.push(`sysparm_query=${query}`);
+            if (fields) queryParts.push(`sysparm_fields=${fields}`);
+            queryParts.push(`sysparm_limit=${limit}`);
+            queryParts.push(`sysparm_offset=${offset}`);
+
+            const url = `/api/now/table/${tableName}?${queryParts.join('&')}`;
+            const { ok, status, body } = await this._fetch(url);
+
+            if (!ok) {
+                throw new Error(`Failed to query table ${tableName} (HTTP ${status}): ${JSON.stringify(body)}`);
+            }
+
+            const records = body?.result || [];
+            allRecords.push(...records);
+
+            if (records.length < limit || (options.limit && options.fetchAll !== true)) {
+                hasMore = false;
+            } else {
+                offset += limit;
+            }
+        }
+
+        console.log(`[ServiceNowAPI] Retrieved ${allRecords.length} records from table "${tableName}".`);
+        return allRecords;
+    }
+
+    /**
+     * Fetch ServiceNow alerts records from table x_bisit_vrm_bitsight_alerts
+     * GET /api/now/table/x_bisit_vrm_bitsight_alerts?sysparm_fields=sys_id,bitsight_vendor_guid,description,x_bisit_vrm_bitsight_alert_guid,severity,trigger,type
+     */
+    async getAlertsRecords(options = {}) {
+        const tableName = options.tableName || 'x_bisit_vrm_bitsight_alerts';
+        const defaultFields = 'sys_id,bitsight_vendor_guid,description,x_bisit_vrm_bitsight_alert_guid,severity,trigger,type';
+        const fields = options.fields || options.sysparm_fields || defaultFields;
+        return await this.getTableRecords(tableName, { ...options, fields });
+    }
+
+    /**
+     * Fetch Bitsight Incidents from incident table
+     * GET /api/now/table/incident?sysparm_query=short_descriptionLIKEbitsight&sysparm_fields=description,sys_id,x_bisit_vrm_bitsight_alert_guid
+     */
+    async getBitsightIncidents(optionsOrQuery = {}) {
+        const options = typeof optionsOrQuery === 'string' ? { query: optionsOrQuery } : (optionsOrQuery || {});
+        const defaultQuery = 'short_descriptionLIKEbitsight';
+        const defaultFields = 'description,sys_id,x_bisit_vrm_bitsight_alert_guid';
+        const query = options.query || options.sysparm_query || defaultQuery;
+        const fields = options.fields || options.sysparm_fields || defaultFields;
+        return await this.getTableRecords('incident', { ...options, query, fields });
+    }
+
+    /**
+     * Generic delete record from any ServiceNow table by sys_id
+     * DELETE /api/now/table/{tableName}/{sys_id}
+     */
+    async deleteTableRecord(tableName, sysId) {
+        if (!sysId || typeof sysId !== 'string') {
+            throw new Error(`deleteTableRecord requires a valid sys_id for table "${tableName}"`);
+        }
+        const url = `/api/now/table/${tableName}/${encodeURIComponent(sysId.trim())}`;
+        const { ok, status, body } = await this._fetch(url, { method: 'DELETE' });
+
+        if (!ok && status !== 204 && status !== 200) {
+            throw new Error(`Failed to delete record ${sysId} from table ${tableName} (HTTP ${status}): ${JSON.stringify(body)}`);
+        }
+
+        return { ok: true, status, sysId };
+    }
+
+    /**
+     * Delete an incident by sys_id
+     * DELETE /api/now/table/incident/{sys_id}
+     */
+    async deleteIncident(sysId) {
+        return await this.deleteTableRecord('incident', sysId);
+    }
+
+    /**
+     * Delete a Bitsight alert by sys_id
+     * DELETE /api/now/table/x_bisit_vrm_bitsight_alerts/{sys_id}
+     */
+    async deleteAlert(sysId) {
+        return await this.deleteTableRecord('x_bisit_vrm_bitsight_alerts', sysId);
+    }
+
+    /**
+     * Fetch Bitsight core_company records from core_company table
+     * GET /api/now/table/core_company?sysparm_query=x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY
+     */
+    async getBitsightCoreCompanies(options = {}) {
+        const defaultQuery = 'x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY';
+        const defaultFields = [
+            'sys_id',
+            'x_bisit_vrm_bitsight_vendor_guid',
+            'x_bisit_vrm_primary_domain',
+            'x_bisit_vrm_is_vrm',
+            'u_is_vrm',
+            'x_bisit_vrm_vendor_guid',
+            'x_bisit_vrm_company_name',
+            'name',
+        ].join(',');
+        const query = options.query || options.sysparm_query || defaultQuery;
+        const fields = options.fields || options.sysparm_fields || defaultFields;
+        const records = await this.getTableRecords('core_company', { ...options, query, fields });
+        return records.map(r => this._normalizeCoreCompanyRecord(r));
+    }
+
+    /**
+     * Delete a core_company record by sys_id
+     * DELETE /api/now/table/core_company/{sys_id}
+     */
+    async deleteCoreCompany(sysId) {
+        return await this.deleteTableRecord('core_company', sysId);
     }
 }
 

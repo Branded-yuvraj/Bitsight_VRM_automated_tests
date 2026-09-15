@@ -1,8 +1,9 @@
-/**
- * Bitsight API Client
- * Independent source of truth for CM and VRM ground truth data.
- * Pure JavaScript - no ServiceNow dependencies.
- */
+const VALID_ALERT_TYPES = [
+    'PERCENT_CHANGE',
+    'RATING_THRESHOLD',
+    'RISK_CATEGORY',
+    'PUBLIC_DISCLOSURE',
+];
 
 class BitsightApiClient {
     constructor(options = {}) {
@@ -328,6 +329,74 @@ class BitsightApiClient {
     }
 
     /**
+     * API 4: VRM Managed Vendor Detail
+     * GET https://service.bitsighttech.com/customer-api/vrm/v1/vendors/managed/${vendor_guid}
+     */
+    async getManagedVendor(vendorGuid) {
+        if (!vendorGuid || typeof vendorGuid !== 'string' || !vendorGuid.trim()) {
+            return { success: false, error: 'Empty vendorGuid', bst_entity_guid: null };
+        }
+        const guid = encodeURIComponent(vendorGuid.trim());
+        const url = `${this.vrmBaseUrl}/customer-api/vrm/v1/vendors/managed/${guid}`;
+        try {
+            const data = await this._fetch(url);
+            const bstEntityGuid = data?.bst_entity_guid || data?.company_guid || data?.entity_guid || null;
+            return { success: true, data, bst_entity_guid: bstEntityGuid };
+        } catch (err) {
+            return { success: false, error: err.message, bst_entity_guid: null };
+        }
+    }
+
+    /**
+     * API 5: VRM Monitored Vendor Detail
+     * GET https://service.bitsighttech.com/customer-api/vrm/v1/vendors/monitored/${vendor_guid}
+     */
+    async getMonitoredVendor(vendorGuid) {
+        if (!vendorGuid || typeof vendorGuid !== 'string' || !vendorGuid.trim()) {
+            return { success: false, error: 'Empty vendorGuid', bst_entity_guid: null };
+        }
+        const guid = encodeURIComponent(vendorGuid.trim());
+        const url = `${this.vrmBaseUrl}/customer-api/vrm/v1/vendors/monitored/${guid}`;
+        try {
+            const data = await this._fetch(url);
+            const bstEntityGuid = data?.bst_entity_guid || data?.company_guid || data?.entity_guid || null;
+            return { success: true, data, bst_entity_guid: bstEntityGuid };
+        } catch (err) {
+            return { success: false, error: err.message, bst_entity_guid: null };
+        }
+    }
+
+    /**
+     * Concurrently resolve bst_entity_guid for a list of VRM vendor objects.
+     * Returns a dictionary: { [vendor_guid]: bst_entity_guid | null }
+     */
+    async resolveVrmVendors(vrmVendors = []) {
+        console.log(`[BitsightAPI] Resolving bst_entity_guid for ${vrmVendors.length} VRM vendors...`);
+        const resolvedMap = {};
+
+        await this._mapConcurrent(vrmVendors, 10, async (vendor) => {
+            const vendorGuid = vendor.vendor_guid || vendor.raw?.vendor_guid || vendor.guid;
+            if (!vendorGuid) return;
+
+            const isManaged = Boolean(vendor.is_managed || vendor.raw?.is_managed);
+            const resp = isManaged
+                ? await this.getManagedVendor(vendorGuid)
+                : await this.getMonitoredVendor(vendorGuid);
+
+            if (resp.success && resp.bst_entity_guid) {
+                resolvedMap[vendorGuid] = resp.bst_entity_guid;
+            } else {
+                resolvedMap[vendorGuid] = null;
+            }
+        });
+
+        const resolvedCount = Object.values(resolvedMap).filter(Boolean).length;
+        const unresolvableCount = Object.values(resolvedMap).filter(v => v === null).length;
+        console.log(`[BitsightAPI] VRM resolution complete: ${resolvedCount} resolved, ${unresolvableCount} unresolvable.`);
+        return resolvedMap;
+    }
+
+    /**
      * API 4: Lifecycle Stages
      * GET https://service.bitsighttech.com/customer-api/vrm/v1/life-cycle-stages
      */
@@ -354,6 +423,113 @@ class BitsightApiClient {
 
         this._cachedLifecycleStages = stageMap;
         return stageMap;
+    }
+
+    /**
+     * API 5: Bitsight Alerts (Raw API fetch)
+     * GET https://api.bitsighttech.com/alerts?expand=details&alert_date_gte=${max_date}&limit=${limit}
+     */
+    async getAlerts(options = {}) {
+        const expand = options.expand !== undefined ? options.expand : 'details';
+        const limit = options.limit || options.pageSize || 20;
+        const maxDate = options.alertDateGte || options.alert_date_gte || options.maxDate || options.max_date;
+
+        const params = new URLSearchParams();
+        if (expand) params.set('expand', expand);
+        if (limit) params.set('limit', String(limit));
+        if (options.offset !== undefined) params.set('offset', String(options.offset));
+        if (maxDate) params.set('alert_date_gte', String(maxDate));
+
+        const url = `${this.ratingsBaseUrl}/alerts?${params.toString()}`;
+        return await this._fetch(url);
+    }
+
+    /**
+     * Fetch all Bitsight alerts matching valid alert types across all pages.
+     * Reconciles against CM portfolio:
+     * 1. Fetches CM portfolio companies to build valid company GUID set.
+     * 2. For each alert, verifies that:
+     *    a) alert.alert_type is in (PERCENT_CHANGE, RATING_THRESHOLD, RISK_CATEGORY, PUBLIC_DISCLOSURE)
+     *    b) alert.company_guid exists in the CM portfolio companies.
+     * 3. Only alerts satisfying both conditions are included in count and results.
+     */
+    async getAllAlerts(options = {}) {
+        const pageSize = options.limit || options.pageSize || 100;
+        const allowedTypes = options.alertTypes || VALID_ALERT_TYPES;
+
+        // 1. Fetch portfolio companies (CM + VRM if available)
+        console.log('[BitsightAPI] Fetching portfolio companies for alerts reconciliation...');
+        let portfolioGuids = new Set();
+        try {
+            const [cmCompanies, vrmVendors] = await Promise.all([
+                this.getCompanies().catch(() => []),
+                this.getVendors().catch(() => []),
+            ]);
+            for (const c of (cmCompanies || [])) {
+                const guid = c.guid || c.bitsight_vendor_guid;
+                if (guid) portfolioGuids.add(guid);
+            }
+            for (const v of (vrmVendors || [])) {
+                const guid = v.bs_company_guid || v.bitsight_vendor_guid || v.vendor_guid || v.guid;
+                if (guid) portfolioGuids.add(guid);
+            }
+        } catch (err) {
+            console.warn('[BitsightAPI] Error loading portfolio for alerts, falling back to CM companies:', err.message);
+            const cmCompanies = await this.getCompanies();
+            portfolioGuids = new Set(cmCompanies.map(c => c.guid || c.bitsight_vendor_guid).filter(Boolean));
+        }
+        console.log(`[BitsightAPI] Loaded ${portfolioGuids.size} portfolio company/vendor GUIDs for alerts filtering.`);
+
+        // 2. Fetch all raw alerts pages
+        const firstPageData = await this.getAlerts({ ...options, limit: pageSize, offset: 0 });
+        const allRawResults = Array.isArray(firstPageData?.results) ? [...firstPageData.results] : (Array.isArray(firstPageData) ? [...firstPageData] : []);
+
+        const totalCount = firstPageData?.count;
+        if (typeof totalCount === 'number' && totalCount > pageSize) {
+            const totalPages = Math.ceil(totalCount / pageSize);
+            const offsets = [];
+            for (let p = 1; p < totalPages; p++) {
+                offsets.push(p * pageSize);
+            }
+
+            console.log(`[BitsightAPI] Concurrently fetching ${offsets.length} remaining alerts pages (total raw=${totalCount})...`);
+            const pageResults = await this._mapConcurrent(offsets, this.maxConcurrency, async (offset) => {
+                const data = await this.getAlerts({ ...options, limit: pageSize, offset });
+                return Array.isArray(data?.results) ? data.results : (Array.isArray(data) ? data : []);
+            });
+
+            for (const batch of pageResults) {
+                allRawResults.push(...batch);
+            }
+        }
+
+        // 3. Filter alerts by valid alert_type AND presence in portfolio
+        const filteredResults = allRawResults.filter(alert => {
+            const isTypeValid = alert.alert_type && allowedTypes.includes(alert.alert_type);
+            if (!isTypeValid) return false;
+
+            const companyGuid = alert.company_guid || alert.company?.guid || alert.details?.company_guid || alert.company_uuid;
+            const existsInPortfolio = companyGuid && portfolioGuids.has(companyGuid);
+
+            return existsInPortfolio;
+        });
+
+        console.log(`[BitsightAPI] Filtered alerts: ${filteredResults.length} matched valid alert types and existing portfolio companies (out of ${allRawResults.length} total raw alerts).`);
+
+        return {
+            count: filteredResults.length,
+            rawCount: allRawResults.length,
+            results: filteredResults,
+            portfolioGuidsCount: portfolioGuids.size,
+        };
+    }
+
+    /**
+     * Fetch total count of filtered Bitsight alerts
+     */
+    async getAlertsCount(options = {}) {
+        const result = await this.getAllAlerts(options);
+        return result.count;
     }
 
     /**
@@ -596,4 +772,5 @@ class BitsightApiClient {
 
 module.exports = {
     BitsightApiClient,
+    VALID_ALERT_TYPES,
 };
