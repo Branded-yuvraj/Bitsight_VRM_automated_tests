@@ -5,6 +5,71 @@ const COMPLETE_MESSAGE = 'Bitsight Portfolios Import Complete';
 const { BitsightApiClient } = require('./utils/bitsight-api-client'); // adjust path as needed
 const {ServiceNowApiClient} = require('./utils/servicenow-api-client'); // adjust path as needed
 
+
+async function getAllCoreCompaniesWithGuid(page) {
+    const fields = 'sys_id,name,x_bisit_vrm_bitsight_vendor_guid';
+    const limit = 200;
+    let offset = 0;
+    let hasMore = true;
+    const allRecords = [];
+
+    while (hasMore) {
+        const url = `/api/now/table/core_company?sysparm_query=x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY` +
+            `&sysparm_fields=${fields}&sysparm_limit=${limit}&sysparm_offset=${offset}`;
+        const { ok, status, body } = await snFetch(page, url);
+        if (!ok) {
+            throw new Error(`Failed to query core_company with guid (HTTP ${status}): ${JSON.stringify(body)}`);
+        }
+
+        const results = body?.result || [];
+        if (!results.length) {
+            hasMore = false;
+            break;
+        }
+
+        for (const row of results) {
+            allRecords.push({
+                sys_id: unwrapField(row.sys_id) || '',
+                name: unwrapField(row.name) || '',
+                guid: unwrapField(row.x_bisit_vrm_bitsight_vendor_guid) || '',
+            });
+        }
+
+        if (results.length < limit) {
+            hasMore = false;
+        } else {
+            offset += limit;
+        }
+    }
+
+    return allRecords;
+}
+
+// Fetches core_company records that have a Bitsight vendor GUID, along with
+// their current "vendor" flag - the field this configuration toggle drives.
+async function getCoreCompanyVendorFlags(page) {
+    const url = `/api/now/table/core_company?sysparm_query=x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY` +
+        `&sysparm_fields=sys_id,name,vendor,x_bisit_vrm_bitsight_vendor_guid&sysparm_limit=1000`;
+    const { ok, status, body } = await snFetch(page, url);
+    if (!ok) {
+        throw new Error(`Failed to query core_company vendor flags (HTTP ${status}): ${JSON.stringify(body)}`);
+    }
+
+    return (body?.result || []).map(row => ({
+        sys_id: unwrapField(row.sys_id) || '',
+        name: unwrapField(row.name) || '',
+        vendor: unwrapField(row.vendor),
+        guid: unwrapField(row.x_bisit_vrm_bitsight_vendor_guid) || '',
+    }));
+}
+
+// ServiceNow booleans come back through the Table API as the strings
+// "true"/"false" - normalize to an actual boolean.
+function isVendorTrue(value) {
+    return value === true || value === 'true';
+}
+
+
 // ---- Session-authenticated fetch helper (runs inside the browser context) ----
 
 async function snFetch(page, url) {
@@ -1871,6 +1936,103 @@ test('TC 050 Unmatched company is inserted when Insert option is enabled', async
 
     console.log('[TC 050] Test complete.');
 });
+
+
+test('TC 051 Imported companies are not marked as vendors when Mark as Vendor is disabled', async ({ page }) => {
+    test.setTimeout(900_000);
+
+    // ---------- Step 1: navigate to Application Configuration (fresh) ----------
+    const frame = await openApplicationConfiguration(page);
+
+    // ---------- Step 2: clear every Bitsight-linked company so the next import re-inserts them all fresh ----------
+    const existingRecords = await getAllCoreCompaniesWithGuid(page);
+    console.log(`[TC 051] Deleting all ${existingRecords.length} existing Bitsight-linked core_company record(s)...`);
+    if (existingRecords.length > 0) {
+        await deleteCoreCompanyRecords(page, existingRecords);
+    }
+
+    // ---------- Step 3: enable Insert (so everything gets reimported) and disable Mark as Vendor, save ----------
+    await frame.locator('#ins_company_y').click();
+    await frame.locator('#mark_comp_n').click();
+    await frame.locator('#property_save_btn').click();
+    await page.waitForTimeout(3000);
+
+    await expect(frame.locator('#ins_company_y')).toBeChecked();
+    await expect(frame.locator('#mark_comp_n')).toBeChecked();
+
+    // ---------- Step 4: capture baseline import log, then trigger the job ----------
+    const baselineLogTimestamp = await getLatestImportCompleteLog(page);
+    await triggerScheduledImport(page, frame);
+
+    // ---------- Step 5: wait for the job to complete ----------
+    const importCompleted = await waitForNewImportLog(page, baselineLogTimestamp);
+    expect(importCompleted, 'Expected a new "Bitsight Portfolios Import Complete" syslog entry after triggering the job').toBeTruthy();
+
+    // ---------- Step 6: every reimported company should be freshly inserted - none should be vendor=true ----------
+    const companyRecords = await getCoreCompanyVendorFlags(page);
+    expect(companyRecords.length, 'Expected at least one core_company record with a Bitsight vendor GUID after the import').toBeGreaterThan(0);
+
+    const unexpectedVendors = companyRecords.filter(r => isVendorTrue(r.vendor));
+    console.log(`[TC 051] ${companyRecords.length} freshly imported companies checked, ${unexpectedVendors.length} unexpectedly marked as vendor=true.`);
+
+    if (unexpectedVendors.length > 0) {
+        console.log(`[TC 051] UNEXPECTED: ${unexpectedVendors.map(r => r.name).join(', ')}`);
+    }
+
+    expect(unexpectedVendors.length, 'Expected all freshly imported companies to have vendor=false when Mark as Vendor is disabled').toBe(0);
+
+    console.log('[TC 051] Confirmed: all freshly imported companies have vendor=false.');
+    console.log('[TC 051] Test complete.');
+});
+
+
+test('TC 052 Imported companies are marked as vendors when Mark as Vendor is enabled', async ({ page }) => {
+    test.setTimeout(900_000);
+
+    // ---------- Step 1: navigate to Application Configuration (fresh) ----------
+    const frame = await openApplicationConfiguration(page);
+
+    // ---------- Step 2: clear every Bitsight-linked company so the next import re-inserts them all fresh ----------
+    const existingRecords = await getAllCoreCompaniesWithGuid(page);
+    console.log(`[TC 052] Deleting all ${existingRecords.length} existing Bitsight-linked core_company record(s)...`);
+    if (existingRecords.length > 0) {
+        await deleteCoreCompanyRecords(page, existingRecords);
+    }
+
+    // ---------- Step 3: enable Insert (so everything gets reimported) and enable Mark as Vendor, save ----------
+    await frame.locator('#ins_company_y').click();
+    await frame.locator('#mark_comp_y').click();
+    await frame.locator('#property_save_btn').click();
+    await page.waitForTimeout(3000);
+
+    await expect(frame.locator('#ins_company_y')).toBeChecked();
+    await expect(frame.locator('#mark_comp_y')).toBeChecked();
+
+    // ---------- Step 4: capture baseline import log, then trigger the job ----------
+    const baselineLogTimestamp = await getLatestImportCompleteLog(page);
+    await triggerScheduledImport(page, frame);
+
+    // ---------- Step 5: wait for the job to complete ----------
+    const importCompleted = await waitForNewImportLog(page, baselineLogTimestamp);
+    expect(importCompleted, 'Expected a new "Bitsight Portfolios Import Complete" syslog entry after triggering the job').toBeTruthy();
+
+    // ---------- Step 6: every reimported company should be freshly inserted - all should be vendor=true ----------
+    const companyRecords = await getCoreCompanyVendorFlags(page);
+    expect(companyRecords.length, 'Expected at least one core_company record with a Bitsight vendor GUID after the import').toBeGreaterThan(0);
+
+    const missingVendorFlag = companyRecords.filter(r => !isVendorTrue(r.vendor));
+    console.log(`[TC 052] ${companyRecords.length} freshly imported companies checked, ${missingVendorFlag.length} unexpectedly NOT marked as vendor=true.`);
+
+    if (missingVendorFlag.length > 0) {
+        console.log(`[TC 052] UNEXPECTED: ${missingVendorFlag.map(r => r.name).join(', ')}`);
+    }
+
+    expect(missingVendorFlag.length, 'Expected all freshly imported companies to have vendor=true when Mark as Vendor is enabled').toBe(0);
+
+    console.log('[TC 052] Confirmed: all freshly imported companies have vendor=true.');
+    console.log('[TC 052] Test complete.');
+});
+
 
 test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via API for restricted user', async ({ page }) => {
     test.setTimeout(120_000);
