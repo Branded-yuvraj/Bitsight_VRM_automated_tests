@@ -1270,6 +1270,28 @@ test('TC 008 Bitsight Portfolio record - Unsubscribe, re-lock website, and re-su
     console.log(`[TC 008] Current rating for "${companyName}" before unsubscribing: "${ratingBefore}"`);
     expect(ratingBefore.length, 'Expected current rating to be populated while subscribed').toBeGreaterThan(0);
 
+    // The primary domain field lives on the Portfolio Information tab. Explicitly
+    // click into that tab first rather than assuming it is already rendered -
+    // avoids reading a stale/empty value due to ServiceNow tab-load flakiness.
+    const portfolioInfoTabBeforeUnsubscribe = frame.getByRole('tab', { name: 'Bitsight Portfolio Information' });
+    await portfolioInfoTabBeforeUnsubscribe.waitFor({ state: 'visible', timeout: 30_000 });
+    await portfolioInfoTabBeforeUnsubscribe.click();
+
+    // Capture the Bitsight primary domain value while the record is still subscribed -
+    // this is the value we will re-use later to re-lock the website after unsubscribing,
+    // instead of relying on a hardcoded env var.
+    const primaryDomainField = frame.getByRole('textbox', { name: 'Read only - cannot be modifiedBitsight primary domain' });
+    await primaryDomainField.waitFor({ state: 'visible', timeout: 30_000 });
+    const primaryDomainValue = (await primaryDomainField.inputValue()).trim();
+    console.log(`[TC 008] Captured Bitsight primary domain for "${companyName}": "${primaryDomainValue}"`);
+    expect(primaryDomainValue.length, 'Expected Bitsight primary domain to be populated before unsubscribing').toBeGreaterThan(0);
+
+    // The Unsubscribe button lives on the Bitsight Security Ratings tab, so
+    // switch back before interacting with it.
+    const securityRatingsTabBeforeUnsubscribe = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
+    await securityRatingsTabBeforeUnsubscribe.waitFor({ state: 'visible', timeout: 30_000 });
+    await securityRatingsTabBeforeUnsubscribe.click();
+
     // Unsubscribe
     const unsubscribeButton = frame.getByRole('button', { name: 'Unsubscribe' });
     await unsubscribeButton.waitFor({ state: 'visible', timeout: 30_000 });
@@ -1301,14 +1323,14 @@ test('TC 008 Bitsight Portfolio record - Unsubscribe, re-lock website, and re-su
     await editWebsiteButton.waitFor({ state: 'visible', timeout: 30_000 });
     await editWebsiteButton.click();
 
-    // NOTE: hardcoding a real domain here since Bitsight needs a resolvable
-    // website to match a vendor against. Replace this if the fixed first
-    // record in this environment is not Accenture.
+    // Using the Bitsight primary domain value captured earlier from this same
+    // record, instead of a hardcoded env var, so the website we lock in always
+    // matches whichever company happened to be first in the portfolio list.
     const websiteField = frame.getByRole('textbox', { name: 'Website' });
     await websiteField.waitFor({ state: 'visible', timeout: 30_000 });
-    await websiteField.fill(process.env.WEBSITE);
+    await websiteField.fill(primaryDomainValue);
     await websiteField.press('ControlOrMeta+a');
-    await websiteField.fill(process.env.WEBSITE);
+    await websiteField.fill(primaryDomainValue);
 
     const lockWebsiteButton = frame.getByRole('button', { name: 'Lock Website' });
     await lockWebsiteButton.waitFor({ state: 'visible', timeout: 30_000 });
