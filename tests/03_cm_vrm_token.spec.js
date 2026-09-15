@@ -1106,7 +1106,7 @@ test('TC-08: Verify CM+VRM company record tabs, cards, and tiles in ServiceNow',
     const ratingHighlights = frame.getByText(/^Rating Highlights/i).first();
     await ratingHighlights.scrollIntoViewIfNeeded();
     await expect(ratingHighlights).toBeVisible({ timeout: 15_000 });
-});
+})
 
 
-abcadsfasd
+
