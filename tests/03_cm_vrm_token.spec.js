@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { BitsightApiClient } from './utils/bitsight-api-client.js';
-import { ServiceNowApiClient } from './utils/servicenow-api-client.js';
+import { ServiceNowApiClient, toSnDateTime } from './utils/servicenow-api-client.js';
 import { clearPortfolio } from './utils/cleanup-utils.js';
 
 const MODULES = [
@@ -95,7 +95,7 @@ test('TC-01: Verify all Bitsight VRM modules are reachable', async ({ page }) =>
 });
 
 // Verify that a valid Bitsight token with both CM and VRM licenses validates successfully and reveals the configuration sections
-test('TC-02: Valid Bitsight token (CM + VRM) validates successfully and reveals config sections', async ({ page }) => {
+test('TC-02: Valid Bitsight token CM_VRM validates successfully and reveals config sections', async ({ page }) => {
     test.setTimeout(240000); // 4 min overall, since validation can take up to ~3 min
 
     const token = process.env.CMVRM_TOKEN;
@@ -171,7 +171,7 @@ test('TC-02: Valid Bitsight token (CM + VRM) validates successfully and reveals 
 });
 
 // Verify that a scheduled import job can be triggered and completes successfully, and that the imported portfolio reconciles with the Bitsight ground truth (CM + VRM)
-test('TC-03: CM + VRM Subscription Type 3 Token Portfolio Import Job', async ({ page }) => {
+test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ page }) => {
     test.setTimeout(1_800_000); // 30 minutes for full import + crawl + reconciliation
 
     const bitsightClient = new BitsightApiClient();
@@ -893,12 +893,223 @@ test('TC-05: Verify ins_company flag does not create duplicate core_company reco
     expect(netNewRecords).toBeLessThanOrEqual(Math.max(0, maxPossibleNew));
 });
 
+test('TC-06: Verify each company is marked as a vendor when mark_company flag is true while importing', async ({ page }) => {
+    test.setTimeout(1_800_000); // 30 minutes for full cleanup + config + import + reconciliation
+
+    const serviceNowClient = new ServiceNowApiClient();
+    const IMPORT_JOB_NAME = 'Bitsight Portfolio Import';
+
+    // -------------------------------------------------------------------------
+    // Pre-Step 1: Clean Up Existing Portfolio in ServiceNow
+    // -------------------------------------------------------------------------
+    console.log('\n=== Pre-Step 1: Cleaning Up Existing Portfolio Records in ServiceNow ===');
+    await clearPortfolio(serviceNowClient);
+
+    // -------------------------------------------------------------------------
+    // Pre-Step 2: Configure Application Properties (mark_comp = true, ins_company = true)
+    // -------------------------------------------------------------------------
+    console.log('\n=== Pre-Step 2: Configuring Application Properties (mark_comp = true) ===');
+    await filterBitsightModules(page);
+    await page.getByRole('link', { name: /^Application Configuration \d+ of \d+$/ }).click();
+
+    const configFrame = page.frameLocator('iframe[name="gsft_main"]');
+
+    // Enable both insert unmatched companies and mark companies as vendor
+    await configFrame.locator('#ins_company_y').check();
+    await configFrame.locator('#mark_comp_y').check();
+    await configFrame.locator('#assign-incident').selectOption('user');
+
+    const userInput = configFrame.locator('[id="sys_display.user"]');
+    await userInput.fill('abel tuter');
+    await userInput.press('Enter');
+
+    const callerInput = configFrame.locator('[id="sys_display.caller"]');
+    await callerInput.fill('abraham lincoln');
+    await callerInput.press('Enter');
+
+    // Save configuration and wait for reload
+    await Promise.all([
+        page.waitForLoadState('networkidle'),
+        configFrame.locator('#property_save_btn').click(),
+    ]);
+
+    // Read back and assert mark_comp setting is true
+    const markCompEnabled = await configFrame.locator('#mark_comp_y').isChecked();
+    console.log(`Application Configuration: "Mark imported companies as Vendor" (mark_comp): ${markCompEnabled}`);
+    expect(markCompEnabled, 'Application configuration mark_comp should be enabled (true)').toBe(true);
+
+    // -------------------------------------------------------------------------
+    // Step 1: Capture Baseline Timestamps
+    // -------------------------------------------------------------------------
+    console.log('\n=== Step 1: Capturing Baseline Timestamps ===');
+    const START_LOG_MESSAGE = 'Bitsight Portfolios Import Begin';
+    const COMPLETION_LOG_MESSAGE = 'Bitsight Portfolios Import Complete';
+
+    const baselineCompleteLogTimestamp = await serviceNowClient.getLatestLogByMessage(COMPLETION_LOG_MESSAGE);
+
+    // -------------------------------------------------------------------------
+    // Step 2: Trigger Scheduled Portfolio Data Import
+    // -------------------------------------------------------------------------
+    console.log('\n=== Step 2: Triggering Scheduled Portfolio Data Import ===');
+    await filterBitsightModules(page);
+    await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).click();
+
+    const gsftFrame = page.locator('iframe[name="gsft_main"]').contentFrame();
+    const importLink = gsftFrame.getByRole('link', { name: `Open record: ${IMPORT_JOB_NAME}` }).first();
+    await importLink.click();
+    await gsftFrame.getByRole('button', { name: 'Execute Now' }).click();
+    console.log('Triggered "Execute Now" for Portfolio Import.');
+
+    // -------------------------------------------------------------------------
+    // Step 3: Wait for Import Completion in syslog & Retrieve Import Begin Timestamp
+    // -------------------------------------------------------------------------
+    console.log('\n=== Step 3: Waiting for Import Completion in syslog ===');
+    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
+        baselineTimestamp: baselineCompleteLogTimestamp,
+        logMessage: COMPLETION_LOG_MESSAGE,
+        timeoutMs: 1_500_000,
+        pollIntervalMs: 15_000,
+    });
+    expect(completeLog, 'Import completion log should be found in syslog').toBeTruthy();
+
+    // Query the "Bitsight Portfolios Import Begin" log for this run
+    const startLogTimestamp = await serviceNowClient.getLatestLogByMessage(START_LOG_MESSAGE);
+    console.log(`Import Begin Log sys_created_on: ${startLogTimestamp}`);
+
+    // -------------------------------------------------------------------------
+    // Step 4: Verify Newly Created Companies in core_company are Marked as Vendors
+    // -------------------------------------------------------------------------
+    console.log('\n=== Step 4: Fetching Newly Created core_company Records ===');
+    const query = startLogTimestamp
+        ? `x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY^sys_created_on>=${startLogTimestamp}`
+        : 'x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY';
+
+    const postImportCompanies = await serviceNowClient.getTableRecords('core_company', {
+        sysparm_query: query,
+        sysparm_fields: 'sys_id,name,vendor,x_bisit_vrm_bitsight_vendor_guid,sys_created_on',
+    });
+
+    console.log(`Newly created core_company count (created on or after ${startLogTimestamp || 'all'}): ${postImportCompanies.length}`);
+    expect(postImportCompanies.length, 'Expected newly created company records after import').toBeGreaterThan(0);
+
+    for (const company of postImportCompanies) {
+        const isVendor = company.vendor === true || company.vendor === 'true' || company.vendor === '1' || company.vendor === 1;
+        expect(isVendor, `Company "${company.name}" (${company.sys_id}) should be marked as vendor (vendor=true)`).toBe(true);
+    }
+});
+
+test('TC-07: Verify each company is NOT marked as a vendor when mark_company flag is false while importing', async ({ page }) => {
+    test.setTimeout(1_800_000); // 30 minutes for full cleanup + config + import + reconciliation
+
+    const serviceNowClient = new ServiceNowApiClient();
+    const IMPORT_JOB_NAME = 'Bitsight Portfolio Import';
+
+    // -------------------------------------------------------------------------
+    // Pre-Step 1: Clean Up Existing Portfolio in ServiceNow
+    // -------------------------------------------------------------------------
+    console.log('\n=== Pre-Step 1: Cleaning Up Existing Portfolio Records in ServiceNow ===');
+    await clearPortfolio(serviceNowClient);
+
+    // -------------------------------------------------------------------------
+    // Pre-Step 2: Configure Application Properties (mark_comp = false, ins_company = true)
+    // -------------------------------------------------------------------------
+    console.log('\n=== Pre-Step 2: Configuring Application Properties (mark_comp = false) ===');
+    await filterBitsightModules(page);
+    await page.getByRole('link', { name: /^Application Configuration \d+ of \d+$/ }).click();
+
+    const configFrame = page.frameLocator('iframe[name="gsft_main"]');
+
+    // Enable insert unmatched companies and disable mark companies as vendor
+    await configFrame.locator('#ins_company_y').check();
+    await configFrame.locator('#mark_comp_n').check();
+    await configFrame.locator('#assign-incident').selectOption('user');
+
+    const userInput = configFrame.locator('[id="sys_display.user"]');
+    await userInput.fill('abel tuter');
+    await userInput.press('Enter');
+
+    const callerInput = configFrame.locator('[id="sys_display.caller"]');
+    await callerInput.fill('abraham lincoln');
+    await callerInput.press('Enter');
+
+    // Save configuration and wait for reload
+    await Promise.all([
+        page.waitForLoadState('networkidle'),
+        configFrame.locator('#property_save_btn').click(),
+    ]);
+
+    // Read back and assert mark_comp setting is false
+    const markCompDisabled = await configFrame.locator('#mark_comp_n').isChecked();
+    console.log(`Application Configuration: "Mark imported companies as Vendor" (mark_comp): ${!markCompDisabled}`);
+    expect(markCompDisabled, 'Application configuration mark_comp should be disabled (false)').toBe(true);
+
+    // -------------------------------------------------------------------------
+    // Step 1: Capture Baseline Timestamps
+    // -------------------------------------------------------------------------
+    console.log('\n=== Step 1: Capturing Baseline Timestamps ===');
+    const START_LOG_MESSAGE = 'Bitsight Portfolios Import Begin';
+    const COMPLETION_LOG_MESSAGE = 'Bitsight Portfolios Import Complete';
+
+    const baselineCompleteLogTimestamp = await serviceNowClient.getLatestLogByMessage(COMPLETION_LOG_MESSAGE);
+
+    // -------------------------------------------------------------------------
+    // Step 2: Trigger Scheduled Portfolio Data Import
+    // -------------------------------------------------------------------------
+    console.log('\n=== Step 2: Triggering Scheduled Portfolio Data Import ===');
+    await filterBitsightModules(page);
+    await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).click();
+
+    const gsftFrame = page.locator('iframe[name="gsft_main"]').contentFrame();
+    const importLink = gsftFrame.getByRole('link', { name: `Open record: ${IMPORT_JOB_NAME}` }).first();
+    await importLink.click();
+    await gsftFrame.getByRole('button', { name: 'Execute Now' }).click();
+    console.log('Triggered "Execute Now" for Portfolio Import.');
+
+    // -------------------------------------------------------------------------
+    // Step 3: Wait for Import Completion in syslog & Retrieve Import Begin Timestamp
+    // -------------------------------------------------------------------------
+    console.log('\n=== Step 3: Waiting for Import Completion in syslog ===');
+    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
+        baselineTimestamp: baselineCompleteLogTimestamp,
+        logMessage: COMPLETION_LOG_MESSAGE,
+        timeoutMs: 1_500_000,
+        pollIntervalMs: 15_000,
+    });
+    expect(completeLog, 'Import completion log should be found in syslog').toBeTruthy();
+
+    // Query the "Bitsight Portfolios Import Begin" log for this run
+    const startLogTimestamp = await serviceNowClient.getLatestLogByMessage(START_LOG_MESSAGE);
+    console.log(`Import Begin Log sys_created_on: ${startLogTimestamp}`);
+
+    // -------------------------------------------------------------------------
+    // Step 4: Verify Newly Created Companies in core_company are NOT Marked as Vendors
+    // -------------------------------------------------------------------------
+    console.log('\n=== Step 4: Fetching Newly Created core_company Records ===');
+    const query = startLogTimestamp
+        ? `x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY^sys_created_on>=${startLogTimestamp}`
+        : 'x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY';
+
+    const postImportCompanies = await serviceNowClient.getTableRecords('core_company', {
+        sysparm_query: query,
+        sysparm_fields: 'sys_id,name,vendor,x_bisit_vrm_bitsight_vendor_guid,sys_created_on',
+    });
+
+    console.log(`Newly created core_company count (created on or after ${startLogTimestamp || 'all'}): ${postImportCompanies.length}`);
+    expect(postImportCompanies.length, 'Expected newly created company records after import').toBeGreaterThan(0);
+
+    for (const company of postImportCompanies) {
+        const isVendor = company.vendor === true || company.vendor === 'true' || company.vendor === '1' || company.vendor === 1;
+        expect(isVendor, `Company "${company.name}" (${company.sys_id}) should NOT be marked as vendor (vendor=false)`).toBe(false);
+    }
+});
+
 // Verify the tabs, buttons, and tiles for a CM-only company record in ServiceNow
-test('TC-06: Verify CM-only company record tabs and tiles in ServiceNow', async ({ page }) => {
+test('TC-08: Verify CM-only company record tabs and tiles in ServiceNow', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(
-        'https://dev292644.service-now.com/now/nav/ui/classic/params/target/' +
+        process.env.SN_URL +
+        'now/nav/ui/classic/params/target/' +
         'core_company_list.do%3Fsysparm_query%3Dx_bisit_vrm_bitsight_vendor_guidISNOTEMPTY%255Ex_bisit_vrm_bs_subscription_type!%253DNULL%255Ex_bisit_vrm_is_vrm%253Dfalse%26sysparm_first_row%3D1%26sysparm_view%3Dbitsight_vrm'
     );
 
@@ -908,7 +1119,7 @@ test('TC-06: Verify CM-only company record tabs and tiles in ServiceNow', async 
     const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
     await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
     const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
-    console.log(`[TC-06] Opening first CM-only company record: "${companyName}"`);
+    console.log(`[TC-08] Opening first CM-only company record: "${companyName}"`);
     await firstRecordLink.click();
 
     // Wait for form to load by waiting for a core tab
@@ -969,11 +1180,12 @@ test('TC-06: Verify CM-only company record tabs and tiles in ServiceNow', async 
 });
 
 // Verify the tabs, buttons, and cards for a VRM-only company record in ServiceNow
-test('TC-07: Verify VRM-only company record tabs and cards in ServiceNow', async ({ page }) => {
+test('TC-09: Verify VRM-only company record tabs and cards in ServiceNow', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(
-        'https://dev292644.service-now.com/now/nav/ui/classic/params/target/' +
+        process.env.SN_URL +
+        'now/nav/ui/classic/params/target/' +
         'core_company_list.do%3Fsysparm_query%3Dx_bisit_vrm_bitsight_vendor_guidISNOTEMPTY%255Ex_bisit_vrm_is_vrm%253Dtrue%255Ex_bisit_vrm_bs_subscription_type%253DNULL%26sysparm_first_row%3D1%26sysparm_view%3Dbitsight_vrm'
     );
 
@@ -983,7 +1195,7 @@ test('TC-07: Verify VRM-only company record tabs and cards in ServiceNow', async
     const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
     await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
     const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
-    console.log(`[TC-07] Opening first VRM-only company record: "${companyName}"`);
+    console.log(`[TC-09] Opening first VRM-only company record: "${companyName}"`);
     await firstRecordLink.click();
 
     // Wait for form to load by waiting for a core tab
@@ -1024,11 +1236,12 @@ test('TC-07: Verify VRM-only company record tabs and cards in ServiceNow', async
 });
 
 // Verify the tabs, cards, and graph tiles for a Company record that has both CM and VRM data in ServiceNow
-test('TC-08: Verify CM+VRM company record tabs, cards, and tiles in ServiceNow', async ({ page }) => {
+test('TC-10: Verify CM_VRM company record tabs, cards, and tiles in ServiceNow', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(
-        'https://dev292644.service-now.com/now/nav/ui/classic/params/target/' +
+        process.env.SN_URL +
+        'now/nav/ui/classic/params/target/' +
         'core_company_list.do%3Fsysparm_query%3Dx_bisit_vrm_bitsight_vendor_guidISNOTEMPTY%255Ex_bisit_vrm_is_vrm%253Dtrue%255Ex_bisit_vrm_bs_subscription_type!%253DNULL%26sysparm_first_row%3D1%26sysparm_view%3Dbitsight_vrm'
     );
 
@@ -1038,7 +1251,7 @@ test('TC-08: Verify CM+VRM company record tabs, cards, and tiles in ServiceNow',
     const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
     await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
     const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
-    console.log(`[TC-08] Opening first CM+VRM company record: "${companyName}"`);
+    console.log(`[TC-10] Opening first CM+VRM company record: "${companyName}"`);
     await firstRecordLink.click();
 
     // Wait for form to load by waiting for a core tab
@@ -1107,3 +1320,5 @@ test('TC-08: Verify CM+VRM company record tabs, cards, and tiles in ServiceNow',
     await ratingHighlights.scrollIntoViewIfNeeded();
     await expect(ratingHighlights).toBeVisible({ timeout: 15_000 });
 });
+
+

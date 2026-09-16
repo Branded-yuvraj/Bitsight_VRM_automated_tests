@@ -800,6 +800,27 @@ class ServiceNowApiClient {
     async deleteCoreCompany(sysId) {
         return await this.deleteTableRecord('core_company', sysId);
     }
+
+    /**
+     * Update a record in any ServiceNow table by sys_id using PATCH
+     * PATCH /api/now/table/{tableName}/{sys_id}
+     */
+    async updateRecord(tableName, sysId, payload = {}) {
+        if (!sysId || typeof sysId !== 'string') {
+            throw new Error(`updateRecord requires a valid sys_id for table "${tableName}"`);
+        }
+        const url = `/api/now/table/${tableName}/${encodeURIComponent(sysId.trim())}`;
+        const { ok, status, body } = await this._fetch(url, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+        });
+
+        if (!ok && status !== 200) {
+            throw new Error(`Failed to update ${tableName}/${sysId} (HTTP ${status}): ${JSON.stringify(body)}`);
+        }
+
+        return body?.result || body;
+    }
 }
 
 module.exports = {

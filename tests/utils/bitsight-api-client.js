@@ -461,22 +461,13 @@ class BitsightApiClient {
         console.log('[BitsightAPI] Fetching portfolio companies for alerts reconciliation...');
         let portfolioGuids = new Set();
         try {
-            const [cmCompanies, vrmVendors] = await Promise.all([
-                this.getCompanies().catch(() => []),
-                this.getVendors().catch(() => []),
-            ]);
+            const cmCompanies = await this.getCompanies();
             for (const c of (cmCompanies || [])) {
                 const guid = c.guid || c.bitsight_vendor_guid;
                 if (guid) portfolioGuids.add(guid);
             }
-            for (const v of (vrmVendors || [])) {
-                const guid = v.bs_company_guid || v.bitsight_vendor_guid || v.vendor_guid || v.guid;
-                if (guid) portfolioGuids.add(guid);
-            }
         } catch (err) {
             console.warn('[BitsightAPI] Error loading portfolio for alerts, falling back to CM companies:', err.message);
-            const cmCompanies = await this.getCompanies();
-            portfolioGuids = new Set(cmCompanies.map(c => c.guid || c.bitsight_vendor_guid).filter(Boolean));
         }
         console.log(`[BitsightAPI] Loaded ${portfolioGuids.size} portfolio company/vendor GUIDs for alerts filtering.`);
 
