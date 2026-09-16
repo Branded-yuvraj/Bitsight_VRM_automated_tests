@@ -2114,3 +2114,376 @@ test('TC 14 Bitsight Assessment Report - template, downloads, and filters (Is VR
     await backButton.waitFor({ state: 'visible', timeout: 30_000 });
     await backButton.click();
 });
+
+test('TC 15 Bitsight Portfolio record - Conditional subscription / re-subscription (Is VRM = true)', async ({ page }) => {
+    test.setTimeout(300_000);
+
+    const snClient = new ServiceNowApiClient();
+
+    // ---------- Step 1: query core_company via the ServiceNow API client for a record where "Is VRM" = true and Bitsight Vendor GUID is not empty ----------
+    const isVrmRecords = await snClient.getTableRecords('core_company', {
+        query: 'x_bisit_vrm_is_vrm=true^x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY',
+        fields: 'sys_id,name',
+        limit: 1,
+    });
+    expect(isVrmRecords.length, 'Expected at least one core_company record with Is VRM = true and a non-empty Bitsight Vendor GUID').toBeGreaterThan(0);
+
+    const targetRecord = isVrmRecords[0];
+    const targetCompanyName = unwrapField(targetRecord.name) || '';
+    console.log(`[TC 15] Target company with Is VRM = true and non-empty Bitsight Vendor GUID: "${targetCompanyName}" (sys_id: ${unwrapField(targetRecord.sys_id)})`);
+    expect(targetCompanyName.length, 'Expected target company name to be non-empty').toBeGreaterThan(0);
+
+    // ---------- Step 2: navigate to the Portfolio list ----------
+    await page.goto(BASE_URL);
+    await page.getByRole('menuitem', { name: 'All' }).click();
+
+    // Nudge the mouse to dismiss any overlay that pops up after this click
+    await page.mouse.move(100, 100);
+    await page.mouse.move(200, 200);
+
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+
+    await page
+        .getByRole('listitem')
+        .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
+        .getByLabel('Portfolio 1 of')
+        .click();
+
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+
+    // Wait for the portfolio list to actually render before trying to click into a record
+    await frame.locator('body').waitFor({ state: 'visible', timeout: 30_000 });
+
+    // ---------- Step 3: filter the portfolio list down to the target company ----------
+    const nameFilterBox = frame.getByRole('searchbox', { name: 'Search column: name' });
+    await nameFilterBox.waitFor({ state: 'visible', timeout: 30_000 });
+    await nameFilterBox.fill(targetCompanyName);
+    await nameFilterBox.press('Enter');
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    // ---------- Step 4: open the specific record matching the "Is VRM = true" company from the API ----------
+    const targetRecordLink = frame.getByRole('link', { name: `Open record: ${targetCompanyName}`, exact: true });
+    await targetRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
+
+    const companyName = (await targetRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
+    console.log(`[TC 15] Opening Portfolio record: "${companyName}" (Is VRM = true)`);
+
+    await targetRecordLink.click();
+
+    // Give the record page time to fully load before interacting with it.
+    const securityRatingsTabAfterOpen = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
+    await securityRatingsTabAfterOpen.waitFor({ state: 'visible', timeout: 30_000 });
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    await securityRatingsTabAfterOpen.click();
+
+    // ---------- Step 5: Check and capture the website/domain FIRST (before any state changes) ----------
+    const existingWebsiteText = frame.locator('div').filter({ hasText: /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/ }).first();
+    const isWebsiteAlreadySet = await existingWebsiteText.isVisible().catch(() => false);
+
+    let domainValue = '';
+    if (isWebsiteAlreadySet) {
+        domainValue = (await existingWebsiteText.innerText()).trim();
+        console.log(`[TC 15] Website already shows a value ("${domainValue}").`);
+    } else {
+        console.log('[TC 15] Website is empty - fetching the primary domain from Portfolio Information instead.');
+
+        const portfolioInfoTabForDomain = frame.getByRole('tab', { name: 'Bitsight Portfolio Information' });
+        await portfolioInfoTabForDomain.waitFor({ state: 'visible', timeout: 30_000 });
+        await portfolioInfoTabForDomain.click();
+
+        const primaryDomainField = frame.getByRole('textbox', { name: 'Read only - cannot be modifiedBitsight primary domain' });
+        await primaryDomainField.waitFor({ state: 'visible', timeout: 30_000 });
+        domainValue = (await primaryDomainField.inputValue()).trim();
+        console.log(`[TC 15] Captured Bitsight primary domain for "${companyName}": "${domainValue}"`);
+        expect(domainValue.length, 'Expected Bitsight primary domain to be populated').toBeGreaterThan(0);
+
+        const securityRatingsTabBeforeSubscribe = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
+        await securityRatingsTabBeforeSubscribe.waitFor({ state: 'visible', timeout: 30_000 });
+        await securityRatingsTabBeforeSubscribe.click();
+    }
+
+    expect(domainValue.length, 'Expected a domain value to be available').toBeGreaterThan(0);
+
+    // ---------- Step 6: Check subscription status and handle accordingly ----------
+    const unsubscribeButton = frame.getByRole('button', { name: 'Unsubscribe' });
+    const subscribeButton = frame.getByRole('button', { name: 'Subscribe' });
+
+    // Wait for either button to appear to determine current subscription status
+    await frame.locator('button:has-text("Subscribe"), button:has-text("Unsubscribe")').first().waitFor({ state: 'visible', timeout: 30_000 });
+    const isCurrentlySubscribed = await unsubscribeButton.isVisible().catch(() => false);
+
+    if (isCurrentlySubscribed) {
+        console.log(`[TC 15] Company "${companyName}" is already subscribed. Unsubscribing first...`);
+        await unsubscribeButton.click();
+
+        const unsubscribeConfirmationText = frame.getByText('Are you sure you want to');
+        await unsubscribeConfirmationText.waitFor({ state: 'visible', timeout: 30_000 });
+        expect(await unsubscribeConfirmationText.isVisible(), 'Expected unsubscribe confirmation prompt to be visible').toBeTruthy();
+
+        const confirmButton = frame.getByRole('button', { name: 'Confirm' });
+        await confirmButton.waitFor({ state: 'visible', timeout: 30_000 });
+        await confirmButton.click();
+
+        await page.waitForLoadState('networkidle').catch(() => { });
+    } else {
+        console.log(`[TC 15] Company "${companyName}" is not subscribed.`);
+    }
+
+    // ---------- Step 7: Ensure Website is Filled and Locked before subscribing ----------
+    console.log(`[TC 15] Locking website using domain: "${domainValue}"`);
+    const editWebsiteButton = frame.getByRole('button', { name: 'Edit Website' });
+    if (await editWebsiteButton.isVisible().catch(() => false)) {
+        await editWebsiteButton.click();
+    }
+
+    const websiteField = frame.getByRole('textbox', { name: 'Website' });
+    await websiteField.waitFor({ state: 'visible', timeout: 30_000 });
+    await websiteField.fill(domainValue);
+
+    const lockWebsiteButton = frame.getByRole('button', { name: 'Lock Website' });
+    await lockWebsiteButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await lockWebsiteButton.click();
+
+    // Save form via context menu
+    await frame.locator('div').nth(3).click({ button: 'right' });
+    const saveMenuItem = frame.getByRole('menuitem', { name: 'Save' });
+    await saveMenuItem.waitFor({ state: 'visible', timeout: 30_000 });
+    await saveMenuItem.click();
+
+    // ---------- Step 8: Wait for network idle and form stabilization after save ----------
+    await page.waitForLoadState('networkidle').catch(() => { });
+    await page.waitForTimeout(2_000); 
+    await frame.getByRole('tab', { name: 'Bitsight Security Ratings' }).waitFor({ state: 'visible', timeout: 30_000 });
+
+    
+    // ---------- Step 9: Subscribe ----------
+    await subscribeButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await subscribeButton.click();
+
+    const subscriptionDialog = frame.getByRole('dialog', { name: 'Bitsight Subscription Request' });
+    await subscriptionDialog.waitFor({ state: 'visible', timeout: 30_000 });
+
+    // Open company selector dropdown inside the modal
+    const companySelectedDropdown = frame.locator('#company-selected');
+    await companySelectedDropdown.waitFor({ state: 'visible', timeout: 30_000 });
+    await companySelectedDropdown.click();
+
+    const companySearchBox = frame.getByRole('textbox', { name: 'Search...' });
+    await companySearchBox.waitFor({ state: 'visible', timeout: 30_000 });
+    
+    // Type the company name (e.g., "gefura")
+    await companySearchBox.fill(companyName);
+    
+    // Wait for the dropdown results list to populate
+    await page.waitForTimeout(1_500);
+
+    // Click the dropdown option matching the company name (handling suffixes like ", Inc." dynamically)
+    const dropdownOption = frame.locator('div, span, a').filter({ hasText: new RegExp(`^${companyName}(?:,\\s*Inc\\.)?$`, 'i') }).last();
+    await dropdownOption.waitFor({ state: 'visible', timeout: 15_000 });
+    await dropdownOption.click();
+
+    // Select subscription type
+    const subscriptionTypeDropdown = frame.getByLabel('Subscription Type', { exact: true });
+    await subscriptionTypeDropdown.waitFor({ state: 'visible', timeout: 30_000 });
+    await subscriptionTypeDropdown.selectOption('continuous_monitoring');
+
+    const submitSubscriptionButton = frame.getByRole('button', { name: 'Submit Subscription Request' });
+    await submitSubscriptionButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await submitSubscriptionButton.click();
+
+    const submittedConfirmationText = frame.getByText('Subscription request has been');
+    await submittedConfirmationText.waitFor({ state: 'visible', timeout: 30_000 });
+    expect(await submittedConfirmationText.isVisible(), 'Expected subscription request confirmation to be visible').toBeTruthy();
+
+    const closeButton = frame.getByRole('button', { name: 'Close', exact: true });
+    await closeButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await closeButton.click();
+
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    const subscriptionTypeField = frame.getByRole('textbox', { name: 'Read only - cannot be' });
+    await subscriptionTypeField.waitFor({ state: 'visible', timeout: 30_000 });
+
+    await expect(async () => {
+        const currentSubscriptionType = (await subscriptionTypeField.inputValue()).trim();
+        expect(currentSubscriptionType.length, 'Expected subscription type field to be populated after re-subscribing').toBeGreaterThan(0);
+    }).toPass({ timeout: 30_000, intervals: [1_000, 2_000, 3_000] });
+
+    const subscriptionTypeValue = (await subscriptionTypeField.inputValue()).trim();
+    console.log(`[TC 15] Subscription type after re-subscribing: "${subscriptionTypeValue}"`);
+
+    // Move to Portfolio Information to verify the GUID was set
+    const portfolioInfoTab = frame.getByRole('tab', { name: 'Bitsight Portfolio Information' });
+    await portfolioInfoTab.waitFor({ state: 'visible', timeout: 30_000 });
+    await portfolioInfoTab.click();
+
+    const guidField = frame.getByRole('textbox', { name: 'Read only - cannot be modifiedBitsight vendor GUID' });
+    await guidField.waitFor({ state: 'visible', timeout: 30_000 });
+    const guidValue = (await guidField.inputValue()).trim();
+    console.log(`[TC 15] Bitsight vendor GUID after re-subscribing: "${guidValue}"`);
+    expect(guidValue.length, 'Expected Bitsight vendor GUID to be populated after re-subscribing').toBeGreaterThan(0);
+});
+
+test('TC 16 Bitsight Portfolio record - Add Vendor (Is VRM = false)', async ({ page }) => {
+    test.setTimeout(300_000);
+
+    const snClient = new ServiceNowApiClient();
+
+    // ---------- Step 1: query core_company via the ServiceNow API client for a record where "Is VRM" = false and Bitsight Vendor GUID is not empty ----------
+    const isVrmFalseRecords = await snClient.getTableRecords('core_company', {
+        query: 'x_bisit_vrm_is_vrm=false^x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY',
+        fields: 'sys_id,name',
+        limit: 1,
+    });
+    expect(isVrmFalseRecords.length, 'Expected at least one core_company record with Is VRM = false and a non-empty Bitsight Vendor GUID').toBeGreaterThan(0);
+
+    const targetRecord = isVrmFalseRecords[0];
+    const targetCompanyName = unwrapField(targetRecord.name) || '';
+    console.log(`[TC 16] Target company with Is VRM = false and non-empty Bitsight Vendor GUID: "${targetCompanyName}" (sys_id: ${unwrapField(targetRecord.sys_id)})`);
+    expect(targetCompanyName.length, 'Expected target company name to be non-empty').toBeGreaterThan(0);
+
+    // ---------- Step 2: navigate to the Portfolio list ----------
+    await page.goto(BASE_URL);
+    await page.getByRole('menuitem', { name: 'All' }).click();
+
+    // Nudge the mouse to dismiss any overlay that pops up after this click
+    await page.mouse.move(100, 100);
+    await page.mouse.move(200, 200);
+
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+
+    await page
+        .getByRole('listitem')
+        .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
+        .getByLabel('Portfolio 1 of')
+        .click();
+
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+
+    // Wait for the portfolio list to actually render before trying to click into a record
+    await frame.locator('body').waitFor({ state: 'visible', timeout: 30_000 });
+
+    // ---------- Step 3: filter the portfolio list down to the target company ----------
+    const nameFilterBox = frame.getByRole('searchbox', { name: 'Search column: name' });
+    await nameFilterBox.waitFor({ state: 'visible', timeout: 30_000 });
+    await nameFilterBox.fill(targetCompanyName);
+    await nameFilterBox.press('Enter');
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    // ---------- Step 4: open the specific record matching the "Is VRM = false" company from the API ----------
+    const targetRecordLink = frame.getByRole('link', { name: `Open record: ${targetCompanyName}`, exact: true });
+    await targetRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
+
+    const companyName = (await targetRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
+    console.log(`[TC 16] Opening Portfolio record: "${companyName}" (Is VRM = false)`);
+
+    await targetRecordLink.click();
+
+    // Give the record page time to fully load before interacting with it.
+    const securityRatingsTabAfterOpen = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
+    await securityRatingsTabAfterOpen.waitFor({ state: 'visible', timeout: 30_000 });
+    await page.waitForLoadState('networkidle').catch(() => { });
+
+    await securityRatingsTabAfterOpen.click();
+
+    // ---------- Step 5: Check and capture the website/domain FIRST ----------
+    const existingWebsiteText = frame.locator('div').filter({ hasText: /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/ }).first();
+    const isWebsiteAlreadySet = await existingWebsiteText.isVisible().catch(() => false);
+
+    let domainValue = '';
+    if (isWebsiteAlreadySet) {
+        domainValue = (await existingWebsiteText.innerText()).trim();
+        console.log(`[TC 16] Website already shows a value ("${domainValue}").`);
+    } else {
+        console.log('[TC 16] Website is empty - fetching the primary domain from Portfolio Information instead.');
+
+        const portfolioInfoTabForDomain = frame.getByRole('tab', { name: 'Bitsight Portfolio Information' });
+        await portfolioInfoTabForDomain.waitFor({ state: 'visible', timeout: 30_000 });
+        await portfolioInfoTabForDomain.click();
+
+        const primaryDomainField = frame.getByRole('textbox', { name: 'Read only - cannot be modifiedBitsight primary domain' });
+        await primaryDomainField.waitFor({ state: 'visible', timeout: 30_000 });
+        domainValue = (await primaryDomainField.inputValue()).trim();
+        console.log(`[TC 16] Captured Bitsight primary domain for "${companyName}": "${domainValue}"`);
+        expect(domainValue.length, 'Expected Bitsight primary domain to be populated').toBeGreaterThan(0);
+
+        const securityRatingsTabBeforeSubscribe = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
+        await securityRatingsTabBeforeSubscribe.waitFor({ state: 'visible', timeout: 30_000 });
+        await securityRatingsTabBeforeSubscribe.click();
+    }
+
+    expect(domainValue.length, 'Expected a domain value to be available').toBeGreaterThan(0);
+
+    // ---------- Step 6: Ensure Website is Filled and Locked ----------
+    console.log(`[TC 16] Locking website using domain: "${domainValue}"`);
+    const editWebsiteButton = frame.getByRole('button', { name: 'Edit Website' });
+    if (await editWebsiteButton.isVisible().catch(() => false)) {
+        await editWebsiteButton.click();
+    }
+
+    const websiteField = frame.getByRole('textbox', { name: 'Website' });
+    await websiteField.waitFor({ state: 'visible', timeout: 30_000 });
+    await websiteField.fill(domainValue);
+
+    const lockWebsiteButton = frame.getByRole('button', { name: 'Lock Website' });
+    await lockWebsiteButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await lockWebsiteButton.click();
+
+    // Save form via context menu
+    await frame.locator('div').nth(3).click({ button: 'right' });
+    const saveMenuItem = frame.getByRole('menuitem', { name: 'Save' });
+    await saveMenuItem.waitFor({ state: 'visible', timeout: 30_000 });
+    await saveMenuItem.click();
+
+    // ---------- Step 7: Wait for network idle and form stabilization after save ----------
+    await page.waitForLoadState('networkidle').catch(() => { });
+    await page.waitForTimeout(2_000);
+    await page.waitForTimeout(15_000);
+
+    // ---------- Step 8: Explicitly click Bitsight Vendor Risk tab after save reload ----------
+    const vendorRiskTab = frame.getByRole('tab', { name: 'Bitsight Vendor Risk' });
+    await vendorRiskTab.waitFor({ state: 'visible', timeout: 30_000 });
+    await vendorRiskTab.click();
+
+    const addVendorButton = frame.getByRole('button', { name: 'Add Vendor' });
+    await addVendorButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await addVendorButton.click();
+
+    // ---------- Step 9: Fill Company and Submit Request ----------
+    const vrmCompanySelected = frame.locator('#vrm-company-selected');
+    await vrmCompanySelected.waitFor({ state: 'visible', timeout: 30_000 });
+    await vrmCompanySelected.click();
+
+    const vrmSearchBox = frame.getByRole('textbox', { name: 'Search...' });
+    await vrmSearchBox.waitFor({ state: 'visible', timeout: 30_000 });
+    await vrmSearchBox.fill(companyName);
+    await page.waitForTimeout(1_000);
+
+    // Click matching dropdown option dynamically (handling Gefura, Inc. edge case)
+    const dropdownOption = frame.locator('div, span, a').filter({ hasText: new RegExp(`^${companyName}(?:,\\s*Inc\\.)?$`, 'i') }).last();
+    if (await dropdownOption.isVisible().catch(() => false)) {
+        await dropdownOption.click();
+    } else {
+        await vrmSearchBox.press('Enter');
+    }
+
+    const vrmSubmitButton = frame.locator('#vrm-subscription-req-btn');
+    await vrmSubmitButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await vrmSubmitButton.click();
+
+    // ---------- Step 10: Validate Success / Error Message ----------
+    const errorMessage = frame.getByText('There is some error in');
+    const hasError = await errorMessage.isVisible({ timeout: 5_000 }).catch(() => false);
+    
+    if (hasError) {
+        console.error('[TC 16] Error message detected: "There is some error in..."');
+    }
+    
+    expect(hasError, 'Expected test to pass successfully, but an error message ("There is some error in") was detected.').toBeFalsy();
+    console.log('[TC 16] Add Vendor request submitted successfully without errors.');
+});
