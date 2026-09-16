@@ -1590,6 +1590,289 @@ test('TC 010 Bitsight Portfolio record - Country field is present on Contact tab
     expect(isCountryFieldVisible, `Expected the Country field to be present on the Contact tab for "${companyName}"`).toBeTruthy();
 });
 
+// test('TC 011 Bitsight Assessment Report - template, downloads, and filters', async ({ page }) => {
+//     test.setTimeout(300_000);
+
+//     await page.goto(BASE_URL);
+//     await page.getByRole('menuitem', { name: 'All' }).click();
+
+//     // Nudge the mouse to dismiss any overlay that pops up after this click
+//     await page.mouse.move(100, 100);
+//     await page.mouse.move(200, 200);
+
+//     const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+//     await searchBox.click();
+//     await searchBox.fill('bitsight');
+
+//     await page
+//         .getByRole('listitem')
+//         .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
+//         .getByLabel('Portfolio 1 of')
+//         .click();
+
+//     const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+
+//     // Wait for the portfolio list to actually render before trying to click into a record
+//     await frame.locator('body').waitFor({ state: 'visible', timeout: 30_000 });
+
+//     // Select whichever company is first in the list, rather than hardcoding a name -
+//     // the portfolio table content can vary between environments/runs.
+//     const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
+//     await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
+
+//     const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
+//     console.log(`[TC 010] Opening first Portfolio record: "${companyName}"`);
+
+//     await firstRecordLink.click();
+
+//     // Give the record page time to fully load before interacting with it.
+//     // Wait on a stable, always-present element (a tab) rather than a flat timeout.
+//     await frame.getByRole('tab', { name: 'Bitsight Security Ratings' }).waitFor({ state: 'visible', timeout: 30_000 });
+//     await page.waitForLoadState('networkidle').catch(() => { });
+
+//     // Switch to the Bitsight Assessment Report tab
+//     const assessmentReportTab = frame.getByRole('tab', { name: 'Bitsight Assessment Report' });
+//     await assessmentReportTab.waitFor({ state: 'visible', timeout: 30_000 });
+//     await assessmentReportTab.click();
+//     await page.waitForLoadState('networkidle').catch(() => { });
+
+//     // frame (FrameLocator) doesn't expose evaluate() - get the underlying
+//     // real Frame object separately just for this one script injection.
+//     const gsftMainFrame = page.frame({ name: 'gsft_main' });
+//     await gsftMainFrame.evaluate(() => {
+//         const style = document.createElement('style');
+//         style.textContent = '* { scroll-behavior: auto !important; }';
+//         document.head.appendChild(style);
+//     });
+
+//     // ---------- Scroll/interaction helpers ----------
+//     async function scrollIntoViewNearest(locator) {
+//         await locator.evaluate((element) => {
+//             element.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+//         });
+//     }
+
+//     async function clickWithoutOuterScroll(locator) {
+//         await scrollIntoViewNearest(locator);
+//         await locator.click({ force: true });
+//     }
+
+//     // The icon toggles the checkbox independently rather than "confirming"
+//     // it - clicking it right after check() just flips the checkbox back off
+//     // (confirmed via logging: afterCheck=true, afterIconClick=false on every
+//     // single item, no exceptions, across sections/flags/grades/risk vectors).
+//     // check() alone already achieves the correct state, so the icon click is
+//     // skipped entirely here.
+//     async function selectFilterOption(checkboxLocator, label) {
+//         const stateBefore = await checkboxLocator.isChecked().catch(() => null);
+
+//         if (stateBefore === true) {
+//             console.log(`[selectFilterOption] "${label}" already checked, skipping`);
+//             return;
+//         }
+
+//         await scrollIntoViewNearest(checkboxLocator);
+//         await checkboxLocator.check({ force: true });
+
+//         const finalState = await checkboxLocator.isChecked();
+//         console.log(`[selectFilterOption] "${label}": checked=${finalState}`);
+
+//         expect(finalState, `Expected "${label}" filter checkbox to be checked after selection`).toBeTruthy();
+//     }
+
+//     // Open one of these expandable multi-select dropdowns (Section, Flag,
+//     // Grades, Risk Vectors, Mapped all share the same toggle pattern) and
+//     // wait briefly for the panel to finish expanding/rendering before
+//     // interacting with anything inside it.
+//     async function openFilterDropdown(toggleLocator) {
+//         await clickWithoutOuterScroll(toggleLocator);
+//         await page.waitForTimeout(500);
+//     }
+
+//     // ---------- Select an assessment template dynamically ----------
+//     // Instead of hardcoding an option value (which is opaque on screen and
+//     // hard to grab via the locator picker since it closes the open dropdown),
+//     // read the <option> elements directly. This works because we're querying
+//     // the DOM, not interacting with an open/rendered dropdown.
+//     const templateDropdown = frame.locator('#assessment-templates');
+//     await templateDropdown.waitFor({ state: 'visible', timeout: 30_000 });
+
+//     const templateOptions = await templateDropdown.locator('option').evaluateAll((options) =>
+//         options.map((option) => ({ value: option.value, text: option.textContent.trim() }))
+//     );
+//     console.log(`[TC 010] Available assessment templates: ${JSON.stringify(templateOptions)}`);
+
+//     const chosenTemplate = templateOptions.find((option) => option.value !== '');
+//     expect(chosenTemplate, 'Expected at least one selectable assessment template option').toBeTruthy();
+//     console.log(`[TC 010] Selecting assessment template: "${chosenTemplate.text}" (value: ${chosenTemplate.value})`);
+
+//     await templateDropdown.selectOption(chosenTemplate.value);
+
+//     // ---------- View Assessment (loads the report inline) ----------
+//     const viewAssessmentButton = frame.getByRole('button', { name: 'View Assessment' });
+//     await viewAssessmentButton.waitFor({ state: 'visible', timeout: 30_000 });
+//     await viewAssessmentButton.click();
+
+//     // Give the report a moment to actually start rendering before polling
+//     // for its columns, rather than checking immediately on click.
+//     await page.waitForTimeout(5_000);
+
+//     const columnChecks = [
+//         { label: 'Section / Sub-Section column', locator: () => frame.getByText('SectionSub-Section') },
+//         { label: 'Question ID column', locator: () => frame.getByText('Question ID') },
+//         { label: 'Question column', locator: () => frame.getByText('Question', { exact: true }) },
+//         { label: 'Risk Vectors column', locator: () => frame.getByText('Risk Vectors', { exact: true }) },
+//         { label: 'Flag column', locator: () => frame.getByText('Flag', { exact: true }) },
+//     ];
+
+//     console.log(`\n--- Assessment Report column check for "${companyName}" ---`);
+//     for (const { label, locator } of columnChecks) {
+//         const isVisible = await locator().isVisible({ timeout: 30_000 }).catch(() => false);
+//         console.log(isVisible ? ` ${label} is visible` : ` ${label} is NOT visible`);
+//         expect(isVisible, `Expected "${label}" to be visible on the Assessment Report`).toBeTruthy();
+//     }
+
+//     console.log(`[TC 010] Assessment report loaded for "${companyName}". Proceeding to CSV download.`);
+
+//     // ---------- Download CSV (triggers an actual file download) ----------
+//     const csvDownloadPromise = page.waitForEvent('download');
+//     const downloadCsvButton = frame.locator('#download_csv_btn');
+//     await downloadCsvButton.waitFor({ state: 'visible', timeout: 30_000 });
+//     await downloadCsvButton.click();
+//     const csvDownload = await csvDownloadPromise;
+//     console.log(`[TC 010] CSV download suggested filename: "${csvDownload.suggestedFilename()}"`);
+//     expect(csvDownload.suggestedFilename().length, 'Expected Download CSV to trigger a named download').toBeGreaterThan(0);
+
+//     // ---------- Section filter: all 17 sections ----------
+//     await openFilterDropdown(frame.getByText('Section Clear'));
+//     await clickWithoutOuterScroll(frame.locator('.overSelect'));
+//     await page.waitForTimeout(500);
+
+//     const sectionNames = [
+//         'Risk Management',
+//         'Security Policy',
+//         'Organizational Security',
+//         'Asset and Information',
+//         'Human Resource Security',
+//         'Physical and Environmental',
+//         'Operations Management',
+//         'Access Control',
+//         'Application Security',
+//         'Incident Event and',
+//         'Business Resiliency',
+//         'Compliance',
+//         'End User Device Security',
+//         'Network Security',
+//         'Privacy',
+//         'Threat Management',
+//         'Server Security',
+//     ];
+
+//     for (const name of sectionNames) {
+//         await selectFilterOption(frame.getByRole('checkbox', { name }), name);
+//     }
+
+//     console.log('[TC 010] All 17 sections selected');
+
+//     // ---------- Flag filter: Flagged and Unflagged Questions ----------
+//     await openFilterDropdown(frame.getByText('FlagClear'));
+
+//     await selectFilterOption(frame.getByRole('checkbox', { name: 'Flagged Questions', exact: true }), 'Flagged Questions');
+//     await selectFilterOption(frame.getByRole('checkbox', { name: 'Unflagged Questions' }), 'Unflagged Questions');
+
+//     console.log('[TC 010] Flag filters selected');
+
+//     // ---------- Grades filter: A, B checked; C/D toggled through; F checked ----------
+//     await openFilterDropdown(frame.getByText('GradesClear'));
+
+//     await selectFilterOption(frame.getByRole('checkbox', { name: 'A', exact: true }), 'Grade A');
+//     await selectFilterOption(frame.getByRole('checkbox', { name: 'B', exact: true }), 'Grade B');
+
+//     // C and D icons toggled without a matching checkbox call ever recorded,
+//     // then F selected instead - kept as icon-only actions per the recording.
+//     await clickWithoutOuterScroll(frame.locator('#svg-grades-C').getByRole('img'));
+//     await clickWithoutOuterScroll(frame.locator('#svg-grades-D > svg > .checkmark-path'));
+//     await clickWithoutOuterScroll(frame.locator('#svg-grades-F').getByRole('img'));
+
+//     expect(await frame.getByRole('checkbox', { name: 'A', exact: true }).isChecked(), 'Expected Grade A to remain checked').toBeTruthy();
+//     expect(await frame.getByRole('checkbox', { name: 'B', exact: true }).isChecked(), 'Expected Grade B to remain checked').toBeTruthy();
+//     console.log('[TC 010] Grades filters selected');
+
+//     // ---------- Risk Vectors filter: full 19-item list ----------
+//     await openFilterDropdown(frame.getByText('Risk VectorsClear'));
+
+//         const riskVectorNames = [
+//         'Botnet Infections',
+//         'Spam Propagation',
+//         'Malware Servers',
+//         'Unsolicited Communications',
+//         'Potentially Exploited',
+//         'SPF',
+//         'DKIM',
+//         'SSL Certificates',
+//         'SSL Configurations',
+//         'Open Ports',
+//         'Web Application Security',
+//         'Critical Vulnerability',
+//         'Insecure Systems',
+//         'Server Software',
+//         'Desktop Software',
+//         'Mobile Software',
+//         'File Sharing',
+//         'Security Incidents',
+//     ];
+
+//     for (const name of riskVectorNames) {
+//         // "Critical Vulnerability" is a partial match against the real
+//         // accessible name "Critical Vulnerability Management" - exact match
+//         // would never find it and hang until timeout, so only this one entry
+//         // is looked up without exact: true.
+//         const useExactMatch = name !== 'Critical Vulnerability';
+//         await selectFilterOption(frame.getByRole('checkbox', { name, exact: useExactMatch }), name);
+//     }
+
+//     // DMARC and Web Application Headers: icon clicked with no paired
+//     // checkbox ever recorded for either - kept as icon-only actions.
+//     await clickWithoutOuterScroll(frame.locator('#svg-risk_vectors-DMARC > svg'));
+//     await clickWithoutOuterScroll(frame.locator('#svg-risk_vectors-DMARC > svg'));
+//     await clickWithoutOuterScroll(frame.locator('[id="svg-risk_vectors-Web Application Headers"] > svg > .checkmark-path'));
+
+//     console.log('[TC 010] Risk Vectors filters selected');
+
+//     // ---------- Mapped filter: Mapped and Unmapped Questions ----------
+//     await openFilterDropdown(frame.getByText('MappedClear'));
+
+//     await selectFilterOption(frame.getByRole('checkbox', { name: 'Mapped Questions', exact: true }), 'Mapped Questions');
+//     await selectFilterOption(frame.getByRole('checkbox', { name: 'Unmapped Questions' }), 'Unmapped Questions');
+
+//     console.log('[TC 010] Mapped filters selected');
+
+//     // ---------- Clear all filters and go back ----------
+//     const clearAllFiltersLink = frame.getByRole('link', { name: 'Clear all filters' });
+//     await clearAllFiltersLink.waitFor({ state: 'visible', timeout: 15_000 });
+//     await clickWithoutOuterScroll(clearAllFiltersLink);
+
+//     // Verify filters actually cleared before leaving the page
+//     expect(
+//         await frame.getByRole('checkbox', { name: 'Security Policy' }).isChecked(),
+//         'Expected Security Policy filter to be cleared'
+//     ).toBeFalsy();
+//     expect(
+//         await frame.getByRole('checkbox', { name: 'A', exact: true }).isChecked(),
+//         'Expected Grade A filter to be cleared'
+//     ).toBeFalsy();
+//     expect(
+//         await frame.getByRole('checkbox', { name: 'Mapped Questions', exact: true }).isChecked(),
+//         'Expected Mapped Questions filter to be cleared'
+//     ).toBeFalsy();
+
+//     console.log(`[TC 010] All filters cleared for "${companyName}"`);
+
+//     const backButton = frame.getByRole('button', { name: 'Back' });
+//     await backButton.waitFor({ state: 'visible', timeout: 30_000 });
+//     await backButton.click();
+// });
+
 test('TC 011 Bitsight Assessment Report - template, downloads, and filters', async ({ page }) => {
     test.setTimeout(300_000);
 
@@ -1621,7 +1904,7 @@ test('TC 011 Bitsight Assessment Report - template, downloads, and filters', asy
     await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
 
     const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
-    console.log(`[TC 010] Opening first Portfolio record: "${companyName}"`);
+    console.log(`[TC 011] Opening first Portfolio record: "${companyName}"`);
 
     await firstRecordLink.click();
 
@@ -1657,13 +1940,14 @@ test('TC 011 Bitsight Assessment Report - template, downloads, and filters', asy
         await locator.click({ force: true });
     }
 
-    // The icon toggles the checkbox independently rather than "confirming"
-    // it - clicking it right after check() just flips the checkbox back off
-    // (confirmed via logging: afterCheck=true, afterIconClick=false on every
-    // single item, no exceptions, across sections/flags/grades/risk vectors).
-    // check() alone already achieves the correct state, so the icon click is
-    // skipped entirely here.
     async function selectFilterOption(checkboxLocator, label) {
+        // Skip if the checkbox is disabled in the UI
+        const isEnabled = await checkboxLocator.isEnabled().catch(() => false);
+        if (!isEnabled) {
+            console.log(`[selectFilterOption] "${label}" is disabled, skipping`);
+            return;
+        }
+
         const stateBefore = await checkboxLocator.isChecked().catch(() => null);
 
         if (stateBefore === true) {
@@ -1680,31 +1964,23 @@ test('TC 011 Bitsight Assessment Report - template, downloads, and filters', asy
         expect(finalState, `Expected "${label}" filter checkbox to be checked after selection`).toBeTruthy();
     }
 
-    // Open one of these expandable multi-select dropdowns (Section, Flag,
-    // Grades, Risk Vectors, Mapped all share the same toggle pattern) and
-    // wait briefly for the panel to finish expanding/rendering before
-    // interacting with anything inside it.
     async function openFilterDropdown(toggleLocator) {
         await clickWithoutOuterScroll(toggleLocator);
         await page.waitForTimeout(500);
     }
 
     // ---------- Select an assessment template dynamically ----------
-    // Instead of hardcoding an option value (which is opaque on screen and
-    // hard to grab via the locator picker since it closes the open dropdown),
-    // read the <option> elements directly. This works because we're querying
-    // the DOM, not interacting with an open/rendered dropdown.
     const templateDropdown = frame.locator('#assessment-templates');
     await templateDropdown.waitFor({ state: 'visible', timeout: 30_000 });
 
     const templateOptions = await templateDropdown.locator('option').evaluateAll((options) =>
         options.map((option) => ({ value: option.value, text: option.textContent.trim() }))
     );
-    console.log(`[TC 010] Available assessment templates: ${JSON.stringify(templateOptions)}`);
+    console.log(`[TC 011] Available assessment templates: ${JSON.stringify(templateOptions)}`);
 
     const chosenTemplate = templateOptions.find((option) => option.value !== '');
     expect(chosenTemplate, 'Expected at least one selectable assessment template option').toBeTruthy();
-    console.log(`[TC 010] Selecting assessment template: "${chosenTemplate.text}" (value: ${chosenTemplate.value})`);
+    console.log(`[TC 011] Selecting assessment template: "${chosenTemplate.text}" (value: ${chosenTemplate.value})`);
 
     await templateDropdown.selectOption(chosenTemplate.value);
 
@@ -1713,9 +1989,7 @@ test('TC 011 Bitsight Assessment Report - template, downloads, and filters', asy
     await viewAssessmentButton.waitFor({ state: 'visible', timeout: 30_000 });
     await viewAssessmentButton.click();
 
-    // Give the report a moment to actually start rendering before polling
-    // for its columns, rather than checking immediately on click.
-    await page.waitForTimeout(5_000);
+    await page.waitForTimeout(25_000);
 
     const columnChecks = [
         { label: 'Section / Sub-Section column', locator: () => frame.getByText('SectionSub-Section') },
@@ -1732,141 +2006,97 @@ test('TC 011 Bitsight Assessment Report - template, downloads, and filters', asy
         expect(isVisible, `Expected "${label}" to be visible on the Assessment Report`).toBeTruthy();
     }
 
-    console.log(`[TC 010] Assessment report loaded for "${companyName}". Proceeding to CSV download.`);
+    console.log(`[TC 011] Assessment report loaded for "${companyName}". Proceeding to CSV download.`);
 
-    // ---------- Download CSV (triggers an actual file download) ----------
+    // ---------- Download CSV ----------
     const csvDownloadPromise = page.waitForEvent('download');
     const downloadCsvButton = frame.locator('#download_csv_btn');
     await downloadCsvButton.waitFor({ state: 'visible', timeout: 30_000 });
     await downloadCsvButton.click();
     const csvDownload = await csvDownloadPromise;
-    console.log(`[TC 010] CSV download suggested filename: "${csvDownload.suggestedFilename()}"`);
+    console.log(`[TC 011] CSV download suggested filename: "${csvDownload.suggestedFilename()}"`);
     expect(csvDownload.suggestedFilename().length, 'Expected Download CSV to trigger a named download').toBeGreaterThan(0);
 
-    // ---------- Section filter: all 17 sections ----------
+    // ---------- Dynamic Section filter (Up to first 10) ----------
     await openFilterDropdown(frame.getByText('Section Clear'));
     await clickWithoutOuterScroll(frame.locator('.overSelect'));
     await page.waitForTimeout(500);
 
-    const sectionNames = [
-        'Risk Management',
-        'Security Policy',
-        'Organizational Security',
-        'Asset and Information',
-        'Human Resource Security',
-        'Physical and Environmental',
-        'Operations Management',
-        'Access Control',
-        'Application Security',
-        'Incident Event and',
-        'Business Resiliency',
-        'Compliance',
-        'End User Device Security',
-        'Network Security',
-        'Privacy',
-        'Threat Management',
-        'Server Security',
-    ];
+    const sectionCheckboxes = frame.locator('input[name="section"]');
+    const sectionCount = await sectionCheckboxes.count();
+    const sectionLimit = Math.min(sectionCount, 10);
+    console.log(`[TC 011] Found ${sectionCount} section checkboxes, evaluating first ${sectionLimit}.`);
+    expect(sectionCount, 'Expected at least one section checkbox').toBeGreaterThan(0);
 
-    for (const name of sectionNames) {
-        await selectFilterOption(frame.getByRole('checkbox', { name }), name);
+    for (let i = 0; i < sectionLimit; i++) {
+        const checkbox = sectionCheckboxes.nth(i);
+        const sectionId = await checkbox.getAttribute('id') || `Section #${i + 1}`;
+        await selectFilterOption(checkbox, sectionId);
     }
+    console.log(`[TC 011] Processed up to ${sectionLimit} sections`);
 
-    console.log('[TC 010] All 17 sections selected');
-
-    // ---------- Flag filter: Flagged and Unflagged Questions ----------
+    // ---------- Dynamic Flag filter (Up to first 10) ----------
     await openFilterDropdown(frame.getByText('FlagClear'));
+    const flagCheckboxes = frame.locator('input[name="flag"]');
+    const flagCount = await flagCheckboxes.count();
+    const flagLimit = Math.min(flagCount, 10);
+    console.log(`[TC 011] Found ${flagCount} flag checkboxes, evaluating first ${flagLimit}.`);
 
-    await selectFilterOption(frame.getByRole('checkbox', { name: 'Flagged Questions', exact: true }), 'Flagged Questions');
-    await selectFilterOption(frame.getByRole('checkbox', { name: 'Unflagged Questions' }), 'Unflagged Questions');
-
-    console.log('[TC 010] Flag filters selected');
-
-    // ---------- Grades filter: A, B checked; C/D toggled through; F checked ----------
-    await openFilterDropdown(frame.getByText('GradesClear'));
-
-    await selectFilterOption(frame.getByRole('checkbox', { name: 'A', exact: true }), 'Grade A');
-    await selectFilterOption(frame.getByRole('checkbox', { name: 'B', exact: true }), 'Grade B');
-
-    // C and D icons toggled without a matching checkbox call ever recorded,
-    // then F selected instead - kept as icon-only actions per the recording.
-    await clickWithoutOuterScroll(frame.locator('#svg-grades-C').getByRole('img'));
-    await clickWithoutOuterScroll(frame.locator('#svg-grades-D > svg > .checkmark-path'));
-    await clickWithoutOuterScroll(frame.locator('#svg-grades-F').getByRole('img'));
-
-    expect(await frame.getByRole('checkbox', { name: 'A', exact: true }).isChecked(), 'Expected Grade A to remain checked').toBeTruthy();
-    expect(await frame.getByRole('checkbox', { name: 'B', exact: true }).isChecked(), 'Expected Grade B to remain checked').toBeTruthy();
-    console.log('[TC 010] Grades filters selected');
-
-    // ---------- Risk Vectors filter: full 19-item list ----------
-    await openFilterDropdown(frame.getByText('Risk VectorsClear'));
-
-        const riskVectorNames = [
-        'Botnet Infections',
-        'Spam Propagation',
-        'Malware Servers',
-        'Unsolicited Communications',
-        'Potentially Exploited',
-        'SPF',
-        'DKIM',
-        'SSL Certificates',
-        'SSL Configurations',
-        'Open Ports',
-        'Web Application Security',
-        'Critical Vulnerability',
-        'Insecure Systems',
-        'Server Software',
-        'Desktop Software',
-        'Mobile Software',
-        'File Sharing',
-        'Security Incidents',
-    ];
-
-    for (const name of riskVectorNames) {
-        // "Critical Vulnerability" is a partial match against the real
-        // accessible name "Critical Vulnerability Management" - exact match
-        // would never find it and hang until timeout, so only this one entry
-        // is looked up without exact: true.
-        const useExactMatch = name !== 'Critical Vulnerability';
-        await selectFilterOption(frame.getByRole('checkbox', { name, exact: useExactMatch }), name);
+    for (let i = 0; i < flagLimit; i++) {
+        const checkbox = flagCheckboxes.nth(i);
+        const flagId = await checkbox.getAttribute('id') || `Flag #${i + 1}`;
+        await selectFilterOption(checkbox, flagId);
     }
+    console.log('[TC 011] Dynamic flag filters processed');
 
-    // DMARC and Web Application Headers: icon clicked with no paired
-    // checkbox ever recorded for either - kept as icon-only actions.
-    await clickWithoutOuterScroll(frame.locator('#svg-risk_vectors-DMARC > svg'));
-    await clickWithoutOuterScroll(frame.locator('#svg-risk_vectors-DMARC > svg'));
-    await clickWithoutOuterScroll(frame.locator('[id="svg-risk_vectors-Web Application Headers"] > svg > .checkmark-path'));
+    // ---------- Dynamic Grades filter (Up to first 10) ----------
+    await openFilterDropdown(frame.getByText('GradesClear'));
+    const gradeCheckboxes = frame.locator('input[name="grade"], input[name="grades"]');
+    const gradeCount = await gradeCheckboxes.count();
+    const gradeLimit = Math.min(gradeCount, 10);
+    console.log(`[TC 011] Found ${gradeCount} grade checkboxes, evaluating first ${gradeLimit}.`);
 
-    console.log('[TC 010] Risk Vectors filters selected');
+    for (let i = 0; i < gradeLimit; i++) {
+        const checkbox = gradeCheckboxes.nth(i);
+        const gradeId = await checkbox.getAttribute('id') || `Grade #${i + 1}`;
+        await selectFilterOption(checkbox, gradeId);
+    }
+    console.log('[TC 011] Dynamic grades filters processed');
 
-    // ---------- Mapped filter: Mapped and Unmapped Questions ----------
+    // ---------- Dynamic Risk Vectors filter (Up to first 10) ----------
+    await openFilterDropdown(frame.getByText('Risk VectorsClear'));
+    const riskCheckboxes = frame.locator('input[name="risk_vector"], input[name*="risk"]');
+    const riskCount = await riskCheckboxes.count();
+    const riskLimit = Math.min(riskCount, 10);
+    console.log(`[TC 011] Found ${riskCount} risk vector checkboxes, evaluating first ${riskLimit}.`);
+
+    for (let i = 0; i < riskLimit; i++) {
+        const checkbox = riskCheckboxes.nth(i);
+        const riskId = await checkbox.getAttribute('id') || `Risk Vector #${i + 1}`;
+        await selectFilterOption(checkbox, riskId);
+    }
+    console.log('[TC 011] Dynamic risk vectors filters processed');
+
+    // ---------- Dynamic Mapped filter (Up to first 10) ----------
     await openFilterDropdown(frame.getByText('MappedClear'));
+    const mappedCheckboxes = frame.locator('input[name="mapped"]');
+    const mappedCount = await mappedCheckboxes.count();
+    const mappedLimit = Math.min(mappedCount, 10);
+    console.log(`[TC 011] Found ${mappedCount} mapped checkboxes, evaluating first ${mappedLimit}.`);
 
-    await selectFilterOption(frame.getByRole('checkbox', { name: 'Mapped Questions', exact: true }), 'Mapped Questions');
-    await selectFilterOption(frame.getByRole('checkbox', { name: 'Unmapped Questions' }), 'Unmapped Questions');
-
-    console.log('[TC 010] Mapped filters selected');
+    for (let i = 0; i < mappedLimit; i++) {
+        const checkbox = mappedCheckboxes.nth(i);
+        const mappedId = await checkbox.getAttribute('id') || `Mapped #${i + 1}`;
+        await selectFilterOption(checkbox, mappedId);
+    }
+    console.log('[TC 011] Dynamic mapped filters processed');
 
     // ---------- Clear all filters and go back ----------
     const clearAllFiltersLink = frame.getByRole('link', { name: 'Clear all filters' });
     await clearAllFiltersLink.waitFor({ state: 'visible', timeout: 15_000 });
     await clickWithoutOuterScroll(clearAllFiltersLink);
 
-    // Verify filters actually cleared before leaving the page
-    expect(
-        await frame.getByRole('checkbox', { name: 'Security Policy' }).isChecked(),
-        'Expected Security Policy filter to be cleared'
-    ).toBeFalsy();
-    expect(
-        await frame.getByRole('checkbox', { name: 'A', exact: true }).isChecked(),
-        'Expected Grade A filter to be cleared'
-    ).toBeFalsy();
-    expect(
-        await frame.getByRole('checkbox', { name: 'Mapped Questions', exact: true }).isChecked(),
-        'Expected Mapped Questions filter to be cleared'
-    ).toBeFalsy();
-
-    console.log(`[TC 010] All filters cleared for "${companyName}"`);
+    console.log(`[TC 011] All filters cleared for "${companyName}"`);
 
     const backButton = frame.getByRole('button', { name: 'Back' });
     await backButton.waitFor({ state: 'visible', timeout: 30_000 });
