@@ -1347,7 +1347,7 @@ test('TC 11 CM_VRM Bitsight Portfolio record - Unsubscribe, re-lock website, and
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1586,7 +1586,7 @@ test('TC 12 Bitsight Portfolio record - Enable Vendor Access flow (Is VRM = fals
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1687,7 +1687,7 @@ test('TC 13 Bitsight Portfolio record - Switch Subscription updates subscription
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1801,7 +1801,7 @@ test('TC 14 Bitsight Portfolio record - Manage Folders moves an available folder
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1922,7 +1922,7 @@ test('TC 15 Trigger import job and check portfolio information (Is VRM = false)'
     const snClient = new ServiceNowApiClient();
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1948,7 +1948,7 @@ test('TC 15 Trigger import job and check portfolio information (Is VRM = false)'
     await frame.locator('#property_save_btn').click();
     await page.waitForTimeout(3000);
     // ---------- Step 2: trigger the scheduled import ----------
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
     await page
         .getByRole('listitem')
         .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
@@ -1992,7 +1992,7 @@ test('TC 15 Trigger import job and check portfolio information (Is VRM = false)'
 
     // ---------- Step 4b: navigate to the Portfolio and open the target record ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -2098,7 +2098,7 @@ test('TC 16 Bitsight Assessment Report - template, downloads, and filters (Is VR
 
     // ---------- Step 2: Navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -2266,7 +2266,7 @@ test('TC 16 Bitsight Assessment Report - template, downloads, and filters (Is VR
     const flagCount = await flagCheckboxes.count();
     const flagLimit = Math.min(flagCount, 10);
     console.log(`[TC 14] Found ${flagCount} flag checkboxes, evaluating first ${flagLimit}.`);
-    
+
     for (let i = 0; i < flagLimit; i++) {
         const checkbox = flagCheckboxes.nth(i);
         const flagId = await checkbox.getAttribute('id') || `Flag #${i + 1}`;
@@ -2348,7 +2348,7 @@ test('TC 17 Bitsight Portfolio record - Conditional subscription / re-subscripti
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -2468,10 +2468,10 @@ test('TC 17 Bitsight Portfolio record - Conditional subscription / re-subscripti
 
     // ---------- Step 8: Wait for network idle and form stabilization after save ----------
     await page.waitForLoadState('networkidle').catch(() => { });
-    await page.waitForTimeout(2_000); 
+    await page.waitForTimeout(2_000);
     await frame.getByRole('tab', { name: 'Bitsight Security Ratings' }).waitFor({ state: 'visible', timeout: 30_000 });
 
-    
+
     // ---------- Step 9: Subscribe ----------
     await subscribeButton.waitFor({ state: 'visible', timeout: 30_000 });
     await subscribeButton.click();
@@ -2486,10 +2486,10 @@ test('TC 17 Bitsight Portfolio record - Conditional subscription / re-subscripti
 
     const companySearchBox = frame.getByRole('textbox', { name: 'Search...' });
     await companySearchBox.waitFor({ state: 'visible', timeout: 30_000 });
-    
+
     // Type the company name (e.g., "gefura")
     await companySearchBox.fill(companyName);
-    
+
     // Wait for the dropdown results list to populate
     await page.waitForTimeout(1_500);
 
@@ -2560,7 +2560,7 @@ test('TC 18 Bitsight Portfolio record - Add Vendor (Is VRM = false)', async ({ p
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -2692,11 +2692,11 @@ test('TC 18 Bitsight Portfolio record - Add Vendor (Is VRM = false)', async ({ p
     // ---------- Step 10: Validate Success / Error Message ----------
     const errorMessage = frame.getByText('There is some error in');
     const hasError = await errorMessage.isVisible({ timeout: 5_000 }).catch(() => false);
-    
+
     if (hasError) {
         console.error('[TC 16] Error message detected: "There is some error in..."');
     }
-    
+
     expect(hasError, 'Expected test to pass successfully, but an error message ("There is some error in") was detected.').toBeFalsy();
     console.log('[TC 16] Add Vendor request submitted successfully without errors.');
 });

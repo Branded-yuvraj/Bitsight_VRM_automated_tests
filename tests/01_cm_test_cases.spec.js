@@ -32,7 +32,7 @@ import {
 const BASE_URL = process.env.SN_URL;
 const COMPLETE_MESSAGE = 'Bitsight Portfolios Import Complete';
 const { BitsightApiClient } = require('./utils/bitsight-api-client'); // adjust path as needed
-const {ServiceNowApiClient} = require('./utils/servicenow-api-client'); // adjust path as needed
+const { ServiceNowApiClient } = require('./utils/servicenow-api-client'); // adjust path as needed
 
 
 
@@ -42,7 +42,8 @@ test('TC 002 Bitsight token validation', async ({ page }) => {
     test.setTimeout(300_000);
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
+
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -99,7 +100,7 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     const bitsightClient = new BitsightApiClient({ token: cmToken });
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -127,7 +128,7 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     await page.waitForTimeout(3000);
 
     // ---------- Step 2: trigger the scheduled import ----------
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
     await page
         .getByRole('listitem')
         .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
@@ -152,8 +153,19 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     const bitsightFields = await getBitsightFieldNames(page);
     expect(bitsightFields.length, 'Expected to find Bitsight fields in sys_dictionary for core_company').toBeGreaterThan(0);
 
-    const guidField = bitsightFields.find(f => f.label.toLowerCase().includes('vendor guid'));
+    // Prefer an exact element match first (most reliable), fall back to a
+    // stricter label match that requires "bitsight" AND "vendor guid" together —
+    // this avoids accidentally matching the VRM-internal "vendor_guid" field,
+    // which the CM-only import never populates.
+    const guidField =
+        bitsightFields.find(f => f.element === 'x_bisit_vrm_bitsight_vendor_guid') ||
+        bitsightFields.find(f =>
+            f.label.toLowerCase().includes('bitsight') &&
+            f.label.toLowerCase().includes('vendor guid')
+        );
+
     expect(guidField, 'Could not locate "Bitsight vendor GUID" field name in dictionary').toBeTruthy();
+    console.log(`[Step 4] Selected guidField: element="${guidField.element}", label="${guidField.label}"`);
 
     // ---------- Step 5: fetch a record (fresh if possible, else any existing one) and check it's populated ----------
     const fieldNames = bitsightFields.map(f => f.element).join(',') + ',sys_id';
@@ -218,7 +230,7 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
 
     console.log('\n');
     console.log('       TIER 1: CM-ONLY COMPLETENESS RECONCILIATION SUMMARY      ');
-    
+
     console.table({
         'Bitsight CM Total (companies)': totalCmCount,
         'Failed Portfolios (from syslog)': failedPortfoliosCount,
@@ -300,7 +312,7 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
 
     console.log('\n');
     console.log('       TIER 2: 15-RECORD CM SAMPLE DEEP VALIDATION REPORT       ');
-    
+
     console.table(sampleValidationSummary);
 
     if (sampleFieldMismatches.length > 0) {
@@ -309,7 +321,7 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     } else {
         console.log('\nAll 15 sampled records matched perfectly with CM Ground Truth.');
     }
-    
+
 
     expect.soft(
         sampleFieldMismatches.length,
@@ -322,7 +334,7 @@ test('TC 004 Bitsight Portfolio record - key sections visible', async ({ page })
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -404,7 +416,7 @@ test('TC 005 Bitsight Portfolio record - Enable Vendor Access flow', async ({ pa
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -475,7 +487,7 @@ test('TC 006 Bitsight Portfolio record - Switch Subscription updates subscriptio
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -557,7 +569,7 @@ test('TC 007 Bitsight Portfolio record - Manage Folders moves an available folde
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -659,7 +671,7 @@ test('TC 008 Bitsight Portfolio record - Unsubscribe, re-lock website, and re-su
     test.setTimeout(300_000);
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -853,7 +865,7 @@ test('TC 008 Bitsight Portfolio record - Unsubscribe, re-lock website, and re-su
 test('TC 009 Trigger import job and check portfolio information', async ({ page }) => {
     test.setTimeout(600_000);
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -879,7 +891,7 @@ test('TC 009 Trigger import job and check portfolio information', async ({ page 
     await frame.locator('#property_save_btn').click();
 
     // ---------- Step 2: trigger the scheduled import ----------
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
     await page
         .getByRole('listitem')
         .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
@@ -897,7 +909,7 @@ test('TC 009 Trigger import job and check portfolio information', async ({ page 
 
     // ---------- Step 4: navigate to the Portfolio and open the first available record ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -972,7 +984,7 @@ test('TC 010 Bitsight Portfolio record - Country field is present on Contact tab
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1028,7 +1040,7 @@ test('TC 010 Bitsight Portfolio record - Country field is present on Contact tab
 //     test.setTimeout(300_000);
 
 //     await page.goto(BASE_URL);
-//     await page.getByRole('menuitem', { name: 'All' }).click();
+//     await page.getByText('All').first().click();
 
 //     // Nudge the mouse to dismiss any overlay that pops up after this click
 //     await page.mouse.move(100, 100);
@@ -1311,7 +1323,7 @@ test('TC 011 Bitsight Assessment Report - template, downloads, and filters', asy
     test.setTimeout(300_000);
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1741,7 +1753,7 @@ test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via A
     await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
 
     await page.getByRole('button', { name: 'Impersonate user' }).click();
-    
+
 
     // Impersonation triggers a full page reload under the hood - if the next
     // snFetch/snMutate call fires while that reload is still in flight, the
@@ -1810,7 +1822,7 @@ test('TC 073 Bitsight Rating and Risk Vector Alerts - Company field is write-pro
     await userCombo.fill('Don Goodliffe');
     await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
     await page.getByRole('button', { name: 'Impersonate user' }).click();
-    
+
 
     // Impersonation triggers a full page reload under the hood - wait for the
     // banner to confirm it's actually settled before touching the page again.
@@ -1818,7 +1830,7 @@ test('TC 073 Bitsight Rating and Risk Vector Alerts - Company field is write-pro
     await page.getByRole('button', { name: 'Don Goodliffe: Available' }).waitFor({ state: 'visible', timeout: 30_000 });
 
     // ---------- Step 2: navigate to the Rating and Risk Vector Alerts list ----------
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
     await searchBox.click();
@@ -1896,7 +1908,7 @@ test('TC 074 Bitsight Incidents - Company field is write-protected via API for r
     await userCombo.fill('Don Goodliffe');
     await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
     await page.getByRole('button', { name: 'Impersonate user' }).click();
-   
+
 
     // Impersonation triggers a full page reload under the hood - wait for the
     // banner to confirm it's actually settled before touching the page again.
@@ -1904,7 +1916,7 @@ test('TC 074 Bitsight Incidents - Company field is write-protected via API for r
     await page.getByRole('button', { name: 'Don Goodliffe: Available' }).waitFor({ state: 'visible', timeout: 30_000 });
 
     // ---------- Step 2: navigate to the Incidents list ----------
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
     await searchBox.click();
@@ -1981,7 +1993,7 @@ test('TC 075 Bitsight Dashboard - permission-denied message shown for restricted
     await userCombo.fill('Don Goodliffe');
     await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
     await page.getByRole('button', { name: 'Impersonate user' }).click();
-    
+
 
     // Impersonation triggers a full page reload under the hood - wait for the
     // banner to confirm it's actually settled before touching the page again.
@@ -1989,7 +2001,7 @@ test('TC 075 Bitsight Dashboard - permission-denied message shown for restricted
     await page.getByRole('button', { name: 'Don Goodliffe: Available' }).waitFor({ state: 'visible', timeout: 30_000 });
 
     // ---------- Step 2: navigate to the Dashboard via search ----------
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
     await searchBox.click();
@@ -2029,7 +2041,7 @@ test('TC 076 & 077 Bitsight - Application Configuration and Scheduled Data Impor
     await userCombo.fill('Don Goodliffe');
     await page.locator('[id$="-item-container"]').filter({ hasText: 'Don Goodliffe' }).click();
     await page.getByRole('button', { name: 'Impersonate user' }).click();
-    
+
 
     // Impersonation triggers a full page reload under the hood - wait for the
     // banner to confirm it's actually settled before touching the page again.
@@ -2037,7 +2049,7 @@ test('TC 076 & 077 Bitsight - Application Configuration and Scheduled Data Impor
     await page.getByRole('button', { name: 'Don Goodliffe: Available' }).waitFor({ state: 'visible', timeout: 30_000 });
 
     // ---------- Step 2: search for "bitsight" ----------
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
     await searchBox.click();
