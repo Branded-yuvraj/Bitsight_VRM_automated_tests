@@ -30,7 +30,7 @@ npm -v
 Clone the repository and install dependencies:
 
 ```bash
-git clone <your-repo-url>
+git clone <https://github.com/Branded-yuvraj/Bitsight_VRM_automated_tests.git>
 cd bs_vrm_playwright
 npm install
 ```
