@@ -1327,7 +1327,7 @@ test('TC-10: Verify CM_VRM company record tabs, cards, and tiles in ServiceNow',
     await expect(ratingHighlights).toBeVisible({ timeout: 15_000 });
 })
 
-test('TC 09 CM_VRM Bitsight Portfolio record - Unsubscribe, re-lock website, and re-subscribe (Is VRM = false)', async ({ page }) => {
+test('TC 11 CM_VRM Bitsight Portfolio record - Unsubscribe, re-lock website, and re-subscribe (Is VRM = false)', async ({ page }) => {
     test.setTimeout(300_000);
 
     const snClient = new ServiceNowApiClient();
@@ -1566,7 +1566,7 @@ test('TC 09 CM_VRM Bitsight Portfolio record - Unsubscribe, re-lock website, and
     expect(guidValue.length, 'Expected Bitsight vendor GUID to be populated after re-subscribing').toBeGreaterThan(0);
 });
 
-test('TC 10 Bitsight Portfolio record - Enable Vendor Access flow (Is VRM = false)', async ({ page }) => {
+test('TC 12 Bitsight Portfolio record - Enable Vendor Access flow (Is VRM = false)', async ({ page }) => {
     test.setTimeout(120_000);
 
     const snClient = new ServiceNowApiClient();
@@ -1667,7 +1667,7 @@ test('TC 10 Bitsight Portfolio record - Enable Vendor Access flow (Is VRM = fals
     console.log(`[TC 10] Vendor Access request sent and dialog closed for "${companyName}"`);
 });
 
-test('TC 11 Bitsight Portfolio record - Switch Subscription updates subscription type (Is VRM = false)', async ({ page }) => {
+test('TC 13 Bitsight Portfolio record - Switch Subscription updates subscription type (Is VRM = false)', async ({ page }) => {
     test.setTimeout(120_000);
 
     const snClient = new ServiceNowApiClient();
@@ -1781,7 +1781,7 @@ test('TC 11 Bitsight Portfolio record - Switch Subscription updates subscription
     console.log(`[TC 11] Subscription type changed: "${subscriptionTypeBefore}" -> "${subscriptionTypeAfter}"`);
 });
 
-test('TC 12 Bitsight Portfolio record - Manage Folders moves an available folder (Is VRM = false)', async ({ page }) => {
+test('TC 14 Bitsight Portfolio record - Manage Folders moves an available folder (Is VRM = false)', async ({ page }) => {
     test.setTimeout(120_000);
 
     const snClient = new ServiceNowApiClient();
@@ -1916,7 +1916,7 @@ test('TC 12 Bitsight Portfolio record - Manage Folders moves an available folder
     console.log(`[TC 12] Folder "${folderLabel}" successfully moved out of Available`);
 });
 
-test('TC 13 Trigger import job and check portfolio information (Is VRM = false)', async ({ page }) => {
+test('TC 15 Trigger import job and check portfolio information (Is VRM = false)', async ({ page }) => {
     test.setTimeout(600_000);
 
     const snClient = new ServiceNowApiClient();
@@ -2078,7 +2078,7 @@ test('TC 13 Trigger import job and check portfolio information (Is VRM = false)'
     console.log(`[TC 13] All Portfolio Information fields verified for "${companyName}"`);
 });
 
-test('TC 14 Bitsight Assessment Report - template, downloads, and filters (Is VRM = false)', async ({ page }) => {
+test('TC 16 Bitsight Assessment Report - template, downloads, and filters (Is VRM = false)', async ({ page }) => {
     test.setTimeout(300_000);
 
     const snClient = new ServiceNowApiClient();
@@ -2328,7 +2328,7 @@ test('TC 14 Bitsight Assessment Report - template, downloads, and filters (Is VR
     await backButton.click();
 });
 
-test('TC 15 Bitsight Portfolio record - Conditional subscription / re-subscription (Is VRM = true)', async ({ page }) => {
+test('TC 17 Bitsight Portfolio record - Conditional subscription / re-subscription (Is VRM = true)', async ({ page }) => {
     test.setTimeout(300_000);
 
     const snClient = new ServiceNowApiClient();
@@ -2540,7 +2540,7 @@ test('TC 15 Bitsight Portfolio record - Conditional subscription / re-subscripti
     expect(guidValue.length, 'Expected Bitsight vendor GUID to be populated after re-subscribing').toBeGreaterThan(0);
 });
 
-test('TC 16 Bitsight Portfolio record - Add Vendor (Is VRM = false)', async ({ page }) => {
+test('TC 18 Bitsight Portfolio record - Add Vendor (Is VRM = false)', async ({ page }) => {
     test.setTimeout(300_000);
 
     const snClient = new ServiceNowApiClient();

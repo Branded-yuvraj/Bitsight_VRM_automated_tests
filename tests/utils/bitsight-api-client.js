@@ -446,30 +446,37 @@ class BitsightApiClient {
 
     /**
      * Fetch all Bitsight alerts matching valid alert types across all pages.
-     * Reconciles against CM portfolio:
-     * 1. Fetches CM portfolio companies to build valid company GUID set.
+     * Reconciles against ServiceNow core_company portfolio:
+     * 1. Requires options.portfolioGuids (Set, Array of strings, or Array of objects { guid }).
      * 2. For each alert, verifies that:
      *    a) alert.alert_type is in (PERCENT_CHANGE, RATING_THRESHOLD, RISK_CATEGORY, PUBLIC_DISCLOSURE)
-     *    b) alert.company_guid exists in the CM portfolio companies.
+     *    b) alert.company_guid exists in the ServiceNow portfolio companies.
      * 3. Only alerts satisfying both conditions are included in count and results.
      */
     async getAllAlerts(options = {}) {
         const pageSize = options.limit || options.pageSize || 100;
         const allowedTypes = options.alertTypes || VALID_ALERT_TYPES;
 
-        // 1. Fetch portfolio companies (CM + VRM if available)
-        console.log('[BitsightAPI] Fetching portfolio companies for alerts reconciliation...');
+        // 1. Process ServiceNow portfolio company GUIDs
         let portfolioGuids = new Set();
-        try {
-            const cmCompanies = await this.getCompanies();
-            for (const c of (cmCompanies || [])) {
-                const guid = c.guid || c.bitsight_vendor_guid;
-                if (guid) portfolioGuids.add(guid);
+        if (options.portfolioGuids) {
+            if (options.portfolioGuids instanceof Set) {
+                portfolioGuids = options.portfolioGuids;
+            } else if (Array.isArray(options.portfolioGuids)) {
+                for (const item of options.portfolioGuids) {
+                    const guid = typeof item === 'string'
+                        ? item
+                        : (item.guid || item.bitsight_vendor_guid || item.bs_company_guid || item.x_bisit_vrm_bitsight_vendor_guid);
+                    if (guid && typeof guid === 'string' && guid.trim()) {
+                        portfolioGuids.add(guid.trim());
+                    }
+                }
             }
-        } catch (err) {
-            console.warn('[BitsightAPI] Error loading portfolio for alerts, falling back to CM companies:', err.message);
+        } else {
+            throw new Error('[BitsightAPI] portfolioGuids is required for getAllAlerts/getAlertsCount to reconcile against ServiceNow portfolio companies.');
         }
-        console.log(`[BitsightAPI] Loaded ${portfolioGuids.size} portfolio company/vendor GUIDs for alerts filtering.`);
+
+        console.log(`[BitsightAPI] Filtering alerts using ${portfolioGuids.size} ServiceNow portfolio company GUIDs.`);
 
         // 2. Fetch all raw alerts pages
         const firstPageData = await this.getAlerts({ ...options, limit: pageSize, offset: 0 });
@@ -494,7 +501,7 @@ class BitsightApiClient {
             }
         }
 
-        // 3. Filter alerts by valid alert_type AND presence in portfolio
+        // 3. Filter alerts by valid alert_type AND presence in ServiceNow portfolio
         const filteredResults = allRawResults.filter(alert => {
             const isTypeValid = alert.alert_type && allowedTypes.includes(alert.alert_type);
             if (!isTypeValid) return false;
@@ -505,7 +512,7 @@ class BitsightApiClient {
             return existsInPortfolio;
         });
 
-        console.log(`[BitsightAPI] Filtered alerts: ${filteredResults.length} matched valid alert types and existing portfolio companies (out of ${allRawResults.length} total raw alerts).`);
+        console.log(`[BitsightAPI] Filtered alerts: ${filteredResults.length} matched valid alert types and ServiceNow portfolio companies (out of ${allRawResults.length} total raw alerts).`);
 
         return {
             count: filteredResults.length,

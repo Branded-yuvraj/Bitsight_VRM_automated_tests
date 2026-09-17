@@ -821,6 +821,159 @@ class ServiceNowApiClient {
 
         return body?.result || body;
     }
+
+    /**
+     * Executes a batch of REST requests against ServiceNow REST Batch API
+     * POST /api/now/v1/batch (with fallback to /api/now/batch)
+     *
+     * @param {Array<{id: string, method: string, url: string, headers?: Array<{name: string, value: string}>, body?: any}>} restRequests
+     * @param {Object} options
+     * @returns {Promise<{ok: boolean, status: number, serviced_requests: Array, unserviced_requests: Array, rawBody: any, error?: string}>}
+     */
+    async executeBatch(restRequests = [], options = {}) {
+        if (!Array.isArray(restRequests) || restRequests.length === 0) {
+            return { ok: true, status: 200, serviced_requests: [], unserviced_requests: [] };
+        }
+
+        const batchRequestId = options.batchRequestId || `batch_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        const batchEndpoint = options.batchEndpoint || '/api/now/v1/batch';
+
+        const payload = {
+            batch_request_id: batchRequestId,
+            rest_requests: restRequests.map((req, idx) => ({
+                id: req.id || String(idx + 1),
+                method: req.method || 'GET',
+                url: req.url,
+                headers: req.headers || [{ name: 'Accept', value: 'application/json' }],
+                ...(req.body !== undefined ? { body: typeof req.body === 'string' ? req.body : JSON.stringify(req.body) } : {})
+            }))
+        };
+
+        let response = await this._fetch(batchEndpoint, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        });
+
+        // Fallback to /api/now/batch if /api/now/v1/batch returns 404 or 400
+        if (!response.ok && (response.status === 404 || response.status === 400) && batchEndpoint === '/api/now/v1/batch') {
+            const fallbackResponse = await this._fetch('/api/now/batch', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            });
+            if (fallbackResponse.ok || fallbackResponse.status !== 404) {
+                response = fallbackResponse;
+            }
+        }
+
+        const body = response.body;
+        const serviced = body?.serviced_requests || body?.result?.serviced_requests || [];
+        const unserviced = body?.unserviced_requests || body?.result?.unserviced_requests || [];
+
+        return {
+            ok: response.ok,
+            status: response.status,
+            serviced_requests: serviced,
+            unserviced_requests: unserviced,
+            rawBody: body,
+            error: response.error || (!response.ok ? `HTTP ${response.status}` : null)
+        };
+    }
+
+    /**
+     * Delete multiple records from any ServiceNow table using the REST Batch API in chunks.
+     * Automatically falls back to sequential single-record deletion if batch fails.
+     *
+     * @param {string} tableName - Target table name (e.g., 'x_bisit_vrm_bitsight_alerts', 'incident', 'core_company')
+     * @param {string[]} sysIds - Array of sys_id strings to delete
+     * @param {number} batchSize - Number of sub-requests per batch (default: 25)
+     * @returns {Promise<{totalFound: number, deletedCount: number, failedCount: number, errors: Array}>}
+     */
+    async deleteRecordsBatch(tableName, sysIds = [], batchSize = 25) {
+        if (!tableName || typeof tableName !== 'string') {
+            throw new Error(`deleteRecordsBatch requires a valid tableName`);
+        }
+
+        const validSysIds = sysIds.filter(id => id && typeof id === 'string').map(id => id.trim());
+        const totalFound = validSysIds.length;
+        if (totalFound === 0) {
+            return { totalFound: 0, deletedCount: 0, failedCount: 0, errors: [] };
+        }
+
+        let deletedCount = 0;
+        let failedCount = 0;
+        const errors = [];
+
+        // Split sysIds into chunks of batchSize
+        const chunks = [];
+        for (let i = 0; i < validSysIds.length; i += batchSize) {
+            chunks.push(validSysIds.slice(i, i + batchSize));
+        }
+
+        for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+            const chunk = chunks[chunkIdx];
+            const restRequests = chunk.map((sysId) => ({
+                id: sysId,
+                method: 'DELETE',
+                url: `/api/now/table/${tableName}/${encodeURIComponent(sysId)}`,
+                headers: [{ name: 'Accept', value: 'application/json' }]
+            }));
+
+            try {
+                const batchResult = await this.executeBatch(restRequests);
+
+                if (!batchResult.ok || (!batchResult.serviced_requests?.length && !batchResult.unserviced_requests?.length)) {
+                    console.warn(`[ServiceNowAPI] Batch delete endpoint returned HTTP ${batchResult.status}, falling back to sequential delete for chunk ${chunkIdx + 1}/${chunks.length}`);
+                    for (const sysId of chunk) {
+                        try {
+                            await this.deleteTableRecord(tableName, sysId);
+                            deletedCount++;
+                        } catch (seqErr) {
+                            failedCount++;
+                            errors.push({ sysId, error: seqErr.message });
+                        }
+                    }
+                    continue;
+                }
+
+                // Process serviced requests
+                for (const serviced of batchResult.serviced_requests) {
+                    const statusCode = serviced.status_code || serviced.statusCode;
+                    const sysId = serviced.id;
+                    if (statusCode === 200 || statusCode === 204) {
+                        deletedCount++;
+                    } else {
+                        failedCount++;
+                        errors.push({ sysId, statusCode, body: serviced.body });
+                    }
+                }
+
+                // Process unserviced requests if any (fallback to sequential for unserviced)
+                for (const unserviced of batchResult.unserviced_requests) {
+                    const sysId = unserviced.id || unserviced;
+                    try {
+                        await this.deleteTableRecord(tableName, sysId);
+                        deletedCount++;
+                    } catch (unservicedErr) {
+                        failedCount++;
+                        errors.push({ sysId, error: unservicedErr.message });
+                    }
+                }
+            } catch (err) {
+                console.warn(`[ServiceNowAPI] Batch delete exception: ${err.message}. Falling back to sequential delete for chunk ${chunkIdx + 1}/${chunks.length}`);
+                for (const sysId of chunk) {
+                    try {
+                        await this.deleteTableRecord(tableName, sysId);
+                        deletedCount++;
+                    } catch (seqErr) {
+                        failedCount++;
+                        errors.push({ sysId, error: seqErr.message });
+                    }
+                }
+            }
+        }
+
+        return { totalFound, deletedCount, failedCount, errors };
+    }
 }
 
 module.exports = {
