@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { BitsightApiClient } from './utils/bitsight-api-client.js';
-import { ServiceNowApiClient } from './utils/servicenow-api-client.js';
+import { ServiceNowApiClient, toSnDateTime } from './utils/servicenow-api-client.js';
 import { clearAlerts, clearIncidents } from './utils/cleanup-utils.js';
 
 // Shared navigation: search for "bitsight" in the nav filter so module links are visible
@@ -119,11 +119,29 @@ test.describe.serial('Type 1 Token CM - Alerts Import and Incident Tests', () =>
         await callerInput.fill('abraham lincoln');
         await callerInput.press('Enter');
 
-        // 2. Save and wait for page reload
+        await configFrame.getByText('Rules for Automation of Incident creation based on Bitsight AlertsMaximum').click();
+        await page.waitForTimeout(10_000);
+
+        // 2. Save and wait for reload
         await Promise.all([
             page.waitForLoadState('networkidle'),
             configFrame.locator('#property_save_btn').click(),
         ]);
+
+        // 3. Read back saved values
+        const savedConfig = {
+            insCompany: await configFrame.locator('#ins_company_y').isChecked(),
+            markComp: await configFrame.locator('#mark_comp_y').isChecked(),
+            maxPropertyInc: await configFrame.locator('#maxpropertyinc').inputValue(),
+            incScore: await configFrame.locator('#inc_score_y').isChecked(),
+            criticalAlertInc: await configFrame.locator('#critcal_alert_inc_y').isChecked(),
+            incWarnAlert: await configFrame.locator('#inc_warn_alert_y').isChecked(),
+            userDisplay: await configFrame.locator('[id="sys_display.user"]').inputValue(),
+            callerDisplay: await configFrame.locator('[id="sys_display.caller"]').inputValue(),
+        };
+
+        console.log('Saved Application Configurations:');
+        console.table(savedConfig);
 
         // Step 1: Capture Baseline Timestamps
         console.log('\n=== Step 1: Capturing Baseline Timestamps ===');
@@ -2508,5 +2526,189 @@ test.describe.serial('Type 3 Token CM_VRM - Alerts Import and Incident Tests', (
                 console.error('Failed to revert company rating during cleanup:', cleanupError);
             }
         }
+    });
+
+    test('TC-Delta: Bitsight Alert Import Job for Delta Data', async ({ page }) => {
+        test.setTimeout(1_800_000); // 30 minutes for import + reconciliation
+
+        const serviceNowClient = new ServiceNowApiClient();
+        const IMPORT_JOB_NAME = 'Bitsight Alerts Import';
+        const COMPLETION_LOG_MESSAGE = 'Bitsight Alerts Import Complete.';
+
+        // -------------------------------------------------------------------------
+        // Step 1: Query existing alert records sorted in descending order of alert_date
+        // -------------------------------------------------------------------------
+        console.log('\n=== Step 1: Fetching existing alert records (sorted by alert_date DESC) ===');
+        let existingAlerts = await serviceNowClient.getTableRecords('x_bisit_vrm_bitsight_alerts', {
+            sysparm_query: 'ORDERBYDESCalert_date^ORORDERBYDESCsys_created_on',
+            sysparm_fields: 'sys_id,alert_date,u_alert_date,sys_created_on,description,severity',
+            fetchAll: true,
+        });
+
+        console.log(`Initial alert records found in x_bisit_vrm_bitsight_alerts: ${existingAlerts.length}`);
+
+        // Precondition Check: If table has fewer than 6 records, perform an initial full import
+        if (existingAlerts.length < 6) {
+            console.log('[DeltaTest] Insufficient existing alert records (< 6). Triggering an initial Alerts Import...');
+            const initBaselineLog = await serviceNowClient.getLatestLogByMessage(page, COMPLETION_LOG_MESSAGE);
+
+            await filterBitsightModules(page);
+            await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).click();
+            const initGsftFrame = page.frameLocator('iframe[name="gsft_main"]');
+            const initImportLink = initGsftFrame.getByRole('link', { name: `Open record: ${IMPORT_JOB_NAME}` }).first();
+            await initImportLink.waitFor({ state: 'visible', timeout: 30_000 });
+            await initImportLink.click();
+            const initExecuteBtn = initGsftFrame.getByRole('button', { name: 'Execute Now' });
+            await initExecuteBtn.waitFor({ state: 'visible', timeout: 30_000 });
+            await initExecuteBtn.click();
+
+            await serviceNowClient.waitForImportCompletion(page, {
+                baselineTimestamp: initBaselineLog,
+                logMessage: COMPLETION_LOG_MESSAGE,
+                timeoutMs: 1_500_000,
+                pollIntervalMs: 15_000,
+            });
+
+            // Re-fetch sorted alerts
+            existingAlerts = await serviceNowClient.getTableRecords('x_bisit_vrm_bitsight_alerts', {
+                sysparm_query: 'ORDERBYDESCalert_date^ORORDERBYDESCsys_created_on',
+                sysparm_fields: 'sys_id,alert_date,u_alert_date,sys_created_on,description,severity',
+                fetchAll: true,
+            });
+            console.log(`Alert records found after initial import: ${existingAlerts.length}`);
+        }
+
+        expect(
+            existingAlerts.length,
+            `Precondition failed: Expected at least 6 existing alert records to perform delta test, but found ${existingAlerts.length}`
+        ).toBeGreaterThanOrEqual(6);
+
+        // -------------------------------------------------------------------------
+        // Step 2: Delete Top 5 Records & Capture 6th Record's alert_date as Reference Date
+        // -------------------------------------------------------------------------
+        console.log('\n=== Step 2: Deleting Top 5 Newest Records & Identifying Reference Date ===');
+        const recordsToDelete = existingAlerts.slice(0, 5);
+        const referenceRecord = existingAlerts[5];
+        const referenceAlertDate = (referenceRecord.alert_date || referenceRecord.u_alert_date || '').toString().trim();
+        const referenceAlertDateOnly = referenceAlertDate.split(' ')[0].split('T')[0];
+
+        console.log(`Top 5 Alert Records to Delete:`);
+        console.table(recordsToDelete.map((r, i) => ({
+            Index: i + 1,
+            SysId: r.sys_id,
+            AlertDate: r.alert_date || r.u_alert_date,
+            Description: (r.description || '').substring(0, 40)
+        })));
+        console.log(`6th Record (Reference Date / High-Water Mark):`);
+        console.log(`  SysId: ${referenceRecord.sys_id}`);
+        console.log(`  Reference Alert Date: ${referenceAlertDate} (Date: ${referenceAlertDateOnly})`);
+
+        const sysIdsToDelete = recordsToDelete.map(r => r.sys_id);
+        const deleteResult = await serviceNowClient.deleteRecordsBatch('x_bisit_vrm_bitsight_alerts', sysIdsToDelete);
+        console.log(`Batch deletion result: ${deleteResult.deletedCount} deleted, ${deleteResult.failedCount} failed of ${sysIdsToDelete.length} total.`);
+        expect(deleteResult.deletedCount, 'All 5 top records should be successfully deleted').toBe(5);
+
+        // Verify remaining top record in table
+        const remainingTopAlerts = await serviceNowClient.getTableRecords('x_bisit_vrm_bitsight_alerts', {
+            sysparm_query: 'ORDERBYDESCalert_date^ORORDERBYDESCsys_created_on',
+            sysparm_fields: 'sys_id,alert_date,u_alert_date',
+            sysparm_limit: 1,
+        });
+        const currentTopDate = (remainingTopAlerts[0]?.alert_date || remainingTopAlerts[0]?.u_alert_date || '').toString().trim();
+        console.log(`Current top alert_date in ServiceNow table after deletion: ${currentTopDate}`);
+        expect(currentTopDate, 'Top alert_date after deletion should match 6th record reference date').toBe(referenceAlertDate);
+
+        // -------------------------------------------------------------------------
+        // Step 3: Trigger "Bitsight Alerts Import" Scheduled Job
+        // -------------------------------------------------------------------------
+        console.log('\n=== Step 3: Triggering Scheduled Bitsight Alerts Import for Delta Data ===');
+        const baselineSyslogTimestamp = await serviceNowClient.getLatestLogByMessage(page, COMPLETION_LOG_MESSAGE);
+        const baselineTriggerIso = new Date().toISOString();
+
+        await filterBitsightModules(page);
+        await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).click();
+
+        const gsftFrame = page.frameLocator('iframe[name="gsft_main"]');
+        const importLink = gsftFrame.getByRole('link', { name: `Open record: ${IMPORT_JOB_NAME}` }).first();
+        await importLink.waitFor({ state: 'visible', timeout: 30_000 });
+        await importLink.click();
+
+        const executeBtn = gsftFrame.getByRole('button', { name: 'Execute Now' });
+        await executeBtn.waitFor({ state: 'visible', timeout: 30_000 });
+        await executeBtn.click();
+        console.log(`Triggered "Execute Now" for ${IMPORT_JOB_NAME}.`);
+
+        // Wait for Import Completion in syslog
+        console.log('\n=== Waiting for Alerts Import Completion in syslog ===');
+        const completeLog = await serviceNowClient.waitForImportCompletion(page, {
+            baselineTimestamp: baselineSyslogTimestamp,
+            logMessage: COMPLETION_LOG_MESSAGE,
+            timeoutMs: 1_500_000,
+            pollIntervalMs: 15_000,
+        });
+        expect(completeLog, 'Alerts import completion log should be found').toBeTruthy();
+
+        // -------------------------------------------------------------------------
+        // Step 4: Fetch Newly Imported Records & Verify Delta Assertions
+        // -------------------------------------------------------------------------
+        console.log('\n=== Step 4: Verifying Delta Import Records & Alert Dates ===');
+        
+        // Fetch all current alert records
+        const allCurrentAlerts = await serviceNowClient.getTableRecords('x_bisit_vrm_bitsight_alerts', {
+            sysparm_query: 'ORDERBYDESCalert_date^ORORDERBYDESCsys_created_on',
+            sysparm_fields: 'sys_id,alert_date,u_alert_date,sys_created_on,description,severity',
+            fetchAll: true,
+        });
+        console.log(`Total alert records in ServiceNow after delta import: ${allCurrentAlerts.length}`);
+
+        // Filter for newly imported records (either by creation time >= baselineTrigger or not in the previous remaining set)
+        const remainingSysIds = new Set(existingAlerts.slice(5).map(r => r.sys_id));
+        const createdSnTime = toSnDateTime(baselineTriggerIso);
+        const newlyImportedAlerts = allCurrentAlerts.filter(record => {
+            const createdOn = record.sys_created_on || '';
+            return createdOn >= createdSnTime || !remainingSysIds.has(record.sys_id);
+        });
+
+        console.log(`Newly imported alert records count: ${newlyImportedAlerts.length}`);
+
+        // Assertion 1: At least 5 alert records are created by the job
+        expect(
+            newlyImportedAlerts.length,
+            `Expected at least 5 alert records to be created by delta import, but found ${newlyImportedAlerts.length}`
+        ).toBeGreaterThanOrEqual(5);
+
+        // Assertion 2: Verify that the alert_date of all newly imported records is >= referenceAlertDate
+        const invalidDateRecords = [];
+        for (const record of newlyImportedAlerts) {
+            const rawDate = (record.alert_date || record.u_alert_date || '').toString().trim();
+            const recordDateOnly = rawDate.split(' ')[0].split('T')[0];
+            if (recordDateOnly && recordDateOnly < referenceAlertDateOnly) {
+                invalidDateRecords.push({
+                    sys_id: record.sys_id,
+                    alert_date: rawDate,
+                    reference_date: referenceAlertDate
+                });
+            }
+        }
+
+        console.log('\n================================================================');
+        console.log('       DELTA ALERTS IMPORT RECONCILIATION SUMMARY               ');
+        console.log('================================================================');
+        console.table({
+            'Reference Alert Date (6th Record)': referenceAlertDate,
+            'Deleted Top Records Count': recordsToDelete.length,
+            'Newly Imported Records Count': newlyImportedAlerts.length,
+            'Total Alerts in ServiceNow After Import': allCurrentAlerts.length,
+            'Invalid Date Records Count': invalidDateRecords.length,
+        });
+
+        if (invalidDateRecords.length > 0) {
+            console.error('Found newly imported records with alert_date older than reference date:', invalidDateRecords);
+        }
+
+        expect(
+            invalidDateRecords.length,
+            `Expected 0 records with alert_date older than reference date (${referenceAlertDate}), but found ${invalidDateRecords.length}`
+        ).toBe(0);
     });
 });

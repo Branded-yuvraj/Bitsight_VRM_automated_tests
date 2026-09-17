@@ -3,7 +3,7 @@ const { ServiceNowApiClient } = require('./servicenow-api-client.js');
 /**
  * Utility to clear all Bitsight incidents from ServiceNow incident table.
  * Fetches all incidents matching Bitsight query, extracts their sys_ids,
- * and deletes each record one by one.
+ * and deletes records in bulk using the ServiceNow REST Batch API.
  *
  * @param {ServiceNowApiClient} serviceNowClient - Instance of ServiceNowApiClient
  * @param {Object} options - Optional query/filtering options
@@ -21,36 +21,19 @@ async function clearIncidents(serviceNowClient, options = {}) {
         return { totalFound: 0, deletedCount: 0, failedCount: 0 };
     }
 
-    let deletedCount = 0;
-    let failedCount = 0;
+    const sysIds = incidents
+        .map(item => item.sys_id?.value || item.sys_id)
+        .filter(Boolean);
 
-    for (let i = 0; i < incidents.length; i++) {
-        const item = incidents[i];
-        const sysId = item.sys_id?.value || item.sys_id;
-
-        if (!sysId) {
-            console.warn(`[CleanupUtils] (Incident ${i + 1}/${totalFound}) Missing sys_id, skipping.`);
-            failedCount++;
-            continue;
-        }
-
-        try {
-            await client.deleteIncident(sysId);
-            deletedCount++;
-            console.log(`[CleanupUtils] (${i + 1}/${totalFound}) Deleted incident sys_id: ${sysId}`);
-        } catch (err) {
-            failedCount++;
-            console.error(`[CleanupUtils] (${i + 1}/${totalFound}) Failed to delete incident ${sysId}: ${err.message}`);
-        }
-    }
-
-    console.log(`[CleanupUtils] Incident cleanup complete: ${deletedCount} deleted, ${failedCount} failed of ${totalFound} total.`);
-    return { totalFound, deletedCount, failedCount };
+    const result = await client.deleteRecordsBatch('incident', sysIds);
+    console.log(`[CleanupUtils] Incident cleanup complete: ${result.deletedCount} deleted, ${result.failedCount} failed of ${totalFound} total.`);
+    return result;
 }
 
 /**
  * Utility to clear all Bitsight alerts from table x_bisit_vrm_bitsight_alerts.
- * Fetches all alert records, extracts their sys_ids, and deletes each record one by one.
+ * Fetches all alert records, extracts their sys_ids, and deletes records
+ * in bulk using the ServiceNow REST Batch API.
  *
  * @param {ServiceNowApiClient} serviceNowClient - Instance of ServiceNowApiClient
  * @param {Object} options - Optional query/filtering options
@@ -68,37 +51,19 @@ async function clearAlerts(serviceNowClient, options = {}) {
         return { totalFound: 0, deletedCount: 0, failedCount: 0 };
     }
 
-    let deletedCount = 0;
-    let failedCount = 0;
+    const sysIds = alerts
+        .map(item => item.sys_id?.value || item.sys_id)
+        .filter(Boolean);
 
-    for (let i = 0; i < alerts.length; i++) {
-        const item = alerts[i];
-        const sysId = item.sys_id?.value || item.sys_id;
-
-        if (!sysId) {
-            console.warn(`[CleanupUtils] (Alert ${i + 1}/${totalFound}) Missing sys_id, skipping.`);
-            failedCount++;
-            continue;
-        }
-
-        try {
-            await client.deleteAlert(sysId);
-            deletedCount++;
-            console.log(`[CleanupUtils] (${i + 1}/${totalFound}) Deleted alert sys_id: ${sysId}`);
-        } catch (err) {
-            failedCount++;
-            console.error(`[CleanupUtils] (${i + 1}/${totalFound}) Failed to delete alert ${sysId}: ${err.message}`);
-        }
-    }
-
-    console.log(`[CleanupUtils] Alerts cleanup complete: ${deletedCount} deleted, ${failedCount} failed of ${totalFound} total.`);
-    return { totalFound, deletedCount, failedCount };
+    const result = await client.deleteRecordsBatch('x_bisit_vrm_bitsight_alerts', sysIds);
+    console.log(`[CleanupUtils] Alerts cleanup complete: ${result.deletedCount} deleted, ${result.failedCount} failed of ${totalFound} total.`);
+    return result;
 }
 
 /**
  * Utility to clear all Bitsight portfolio records from core_company table.
  * Fetches all core_company records where x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY,
- * extracts their sys_ids, and deletes each record one by one.
+ * extracts their sys_ids, and deletes records in bulk using the ServiceNow REST Batch API.
  *
  * @param {ServiceNowApiClient} serviceNowClient - Instance of ServiceNowApiClient
  * @param {Object} options - Optional query/filtering options
@@ -116,31 +81,13 @@ async function clearPortfolio(serviceNowClient, options = {}) {
         return { totalFound: 0, deletedCount: 0, failedCount: 0 };
     }
 
-    let deletedCount = 0;
-    let failedCount = 0;
+    const sysIds = companies
+        .map(item => item.sys_id?.value || item.sys_id)
+        .filter(Boolean);
 
-    for (let i = 0; i < companies.length; i++) {
-        const item = companies[i];
-        const sysId = item.sys_id?.value || item.sys_id;
-
-        if (!sysId) {
-            console.warn(`[CleanupUtils] (Company ${i + 1}/${totalFound}) Missing sys_id, skipping.`);
-            failedCount++;
-            continue;
-        }
-
-        try {
-            await client.deleteCoreCompany(sysId);
-            deletedCount++;
-            console.log(`[CleanupUtils] (${i + 1}/${totalFound}) Deleted core_company sys_id: ${sysId}`);
-        } catch (err) {
-            failedCount++;
-            console.error(`[CleanupUtils] (${i + 1}/${totalFound}) Failed to delete core_company ${sysId}: ${err.message}`);
-        }
-    }
-
-    console.log(`[CleanupUtils] Portfolio cleanup complete: ${deletedCount} deleted, ${failedCount} failed of ${totalFound} total.`);
-    return { totalFound, deletedCount, failedCount };
+    const result = await client.deleteRecordsBatch('core_company', sysIds);
+    console.log(`[CleanupUtils] Portfolio cleanup complete: ${result.deletedCount} deleted, ${result.failedCount} failed of ${totalFound} total.`);
+    return result;
 }
 
 module.exports = {
