@@ -1347,7 +1347,7 @@ test('TC 09 CM_VRM Bitsight Portfolio record - Unsubscribe, re-lock website, and
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1586,7 +1586,7 @@ test('TC 10 Bitsight Portfolio record - Enable Vendor Access flow (Is VRM = fals
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1687,7 +1687,7 @@ test('TC 11 Bitsight Portfolio record - Switch Subscription updates subscription
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1801,7 +1801,7 @@ test('TC 12 Bitsight Portfolio record - Manage Folders moves an available folder
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1922,7 +1922,7 @@ test('TC 13 Trigger import job and check portfolio information (Is VRM = false)'
     const snClient = new ServiceNowApiClient();
 
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -1948,7 +1948,7 @@ test('TC 13 Trigger import job and check portfolio information (Is VRM = false)'
     await frame.locator('#property_save_btn').click();
     await page.waitForTimeout(3000);
     // ---------- Step 2: trigger the scheduled import ----------
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
     await page
         .getByRole('listitem')
         .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
@@ -1992,7 +1992,7 @@ test('TC 13 Trigger import job and check portfolio information (Is VRM = false)'
 
     // ---------- Step 4b: navigate to the Portfolio and open the target record ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -2098,7 +2098,7 @@ test('TC 14 Bitsight Assessment Report - template, downloads, and filters (Is VR
 
     // ---------- Step 2: Navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -2348,7 +2348,7 @@ test('TC 15 Bitsight Portfolio record - Conditional subscription / re-subscripti
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -2560,7 +2560,7 @@ test('TC 16 Bitsight Portfolio record - Add Vendor (Is VRM = false)', async ({ p
 
     // ---------- Step 2: navigate to the Portfolio list ----------
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
