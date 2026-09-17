@@ -2266,7 +2266,7 @@ test('TC 14 Bitsight Assessment Report - template, downloads, and filters (Is VR
     const flagCount = await flagCheckboxes.count();
     const flagLimit = Math.min(flagCount, 10);
     console.log(`[TC 14] Found ${flagCount} flag checkboxes, evaluating first ${flagLimit}.`);
-    
+
     for (let i = 0; i < flagLimit; i++) {
         const checkbox = flagCheckboxes.nth(i);
         const flagId = await checkbox.getAttribute('id') || `Flag #${i + 1}`;
@@ -2468,10 +2468,10 @@ test('TC 15 Bitsight Portfolio record - Conditional subscription / re-subscripti
 
     // ---------- Step 8: Wait for network idle and form stabilization after save ----------
     await page.waitForLoadState('networkidle').catch(() => { });
-    await page.waitForTimeout(2_000); 
+    await page.waitForTimeout(2_000);
     await frame.getByRole('tab', { name: 'Bitsight Security Ratings' }).waitFor({ state: 'visible', timeout: 30_000 });
 
-    
+
     // ---------- Step 9: Subscribe ----------
     await subscribeButton.waitFor({ state: 'visible', timeout: 30_000 });
     await subscribeButton.click();
@@ -2486,10 +2486,10 @@ test('TC 15 Bitsight Portfolio record - Conditional subscription / re-subscripti
 
     const companySearchBox = frame.getByRole('textbox', { name: 'Search...' });
     await companySearchBox.waitFor({ state: 'visible', timeout: 30_000 });
-    
+
     // Type the company name (e.g., "gefura")
     await companySearchBox.fill(companyName);
-    
+
     // Wait for the dropdown results list to populate
     await page.waitForTimeout(1_500);
 
@@ -2692,11 +2692,11 @@ test('TC 16 Bitsight Portfolio record - Add Vendor (Is VRM = false)', async ({ p
     // ---------- Step 10: Validate Success / Error Message ----------
     const errorMessage = frame.getByText('There is some error in');
     const hasError = await errorMessage.isVisible({ timeout: 5_000 }).catch(() => false);
-    
+
     if (hasError) {
         console.error('[TC 16] Error message detected: "There is some error in..."');
     }
-    
+
     expect(hasError, 'Expected test to pass successfully, but an error message ("There is some error in") was detected.').toBeFalsy();
     console.log('[TC 16] Add Vendor request submitted successfully without errors.');
 });
