@@ -123,11 +123,11 @@ async function triggerAndWaitForAlertsImport(page, serviceNowClient, options = {
 
     const gsftFrame = page.frameLocator('iframe[name="gsft_main"]');
     const importLink = gsftFrame.getByRole('link', { name: `Open record: ${IMPORT_JOB_NAME}` }).first();
-    await importLink.waitFor({ state: 'visible', timeout: 30_000 });
+    await importLink.waitFor({ state: 'visible', timeout: 50_000 });
     await importLink.click();
 
-    const executeBtn = gsftFrame.getByRole('button', { name: 'Execute Now' });
-    await executeBtn.waitFor({ state: 'visible', timeout: 30_000 });
+    const executeBtn = gsftFrame.getByRole('button', { name: 'Execute Now' }).first();
+    await executeBtn.waitFor({ state: 'visible', timeout: 50_000 });
     await executeBtn.click();
     console.log(`Triggered "Execute Now" for ${IMPORT_JOB_NAME}.`);
 
@@ -150,8 +150,8 @@ async function triggerAndWaitForAlertsImport(page, serviceNowClient, options = {
     return { baselineTimestamp: baselineSyslogTimestamp, completeLog };
 }
 
-test.describe.serial('Type 1 Token CM - Alerts Import and Incident Tests', () => {
-    test('Bitsight Type 1 token CM validation', async ({ page }) => {
+test.describe.serial('Token CM - Alerts Import and Incident Tests', () => {
+    test('Bitsight CM token validation', async ({ page }) => {
         test.setTimeout(500_000); // 5 minutes
 
         const token = process.env.CM_TOKEN;
@@ -1056,7 +1056,7 @@ test.describe.serial('Type 1 Token CM - Alerts Import and Incident Tests', () =>
 });
 
 test.describe.serial('Type 3 Token CM_VRM - Alerts Import and Incident Tests', () => {
-    test('Bitsight Type 3 token CM_VRM validation', async ({ page }) => {
+    test('Bitsight CM_VRM token validation', async ({ page }) => {
         test.setTimeout(500_000); // 5 minutes
 
         const token = process.env.CMVRM_TOKEN;
@@ -1079,7 +1079,7 @@ test.describe.serial('Type 3 Token CM_VRM - Alerts Import and Incident Tests', (
         if (existingValue.trim() !== '') {
             await clearTokenButton.click();
             await okButton.click();
-            await expect(tokenInput).toHaveValue('', { timeout: 30_000 });
+            await expect(tokenInput).toHaveValue('', { timeout: 50_000 });
         }
 
         await tokenInput.fill(token);

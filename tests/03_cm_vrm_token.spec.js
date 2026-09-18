@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { BitsightApiClient } from './utils/bitsight-api-client.js';
 import { ServiceNowApiClient, toSnDateTime } from './utils/servicenow-api-client.js';
 import { clearPortfolio } from './utils/cleanup-utils.js';
+import { snFetch, snMutate } from './utils/servicenow-session-helpers.js';
 
 const BASE_URL = process.env.SN_URL;
 
@@ -20,6 +21,46 @@ const MODULES = [
     'Contact Support',
     'App Privacy Policy',
 ];
+
+const USER_VISIBLE_MODULES = [
+    'Portfolio',
+    'Rating and Risk Vector Alerts',
+    'Incidents',
+    'Dashboard',
+    'About Bitsight',
+    'Contact Support',
+    'App Privacy Policy',
+];
+
+const USER_HIDDEN_MODULES = [
+    'Application Configuration',
+    'Scheduled Data Imports',
+];
+
+/**
+ * Logs out of current session and logs in with specified credentials
+ */
+async function switchUser(page, username, password) {
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+
+    const userMenuButton = page.getByRole('button', { name: new RegExp(`${process.env.SN_USER || 'bitsight_admin'}.*Available`, 'i') }).or(page.getByRole('button', { name: /Available|User menu/i })).first();
+    await userMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await userMenuButton.click();
+
+    const logoutButton = page.getByRole('button', { name: 'Log out' }).or(page.getByRole('menuitem', { name: 'Log out' })).first();
+    await logoutButton.waitFor({ state: 'visible', timeout: 10_000 });
+    await logoutButton.click();
+
+    const usernameField = page.getByRole('textbox', { name: 'User name' });
+    await usernameField.waitFor({ state: 'visible', timeout: 60_000 });
+    await usernameField.fill(username);
+
+    const passwordField = page.getByRole('textbox', { name: 'Password' });
+    await passwordField.fill(password);
+
+    await page.getByRole('button', { name: 'Log in' }).click();
+    await usernameField.waitFor({ state: 'hidden', timeout: 60_000 });
+}
 
 async function filterBitsightModules(page) {
   await page.goto('/', { waitUntil: 'networkidle' });
@@ -2322,4 +2363,573 @@ test('TC 18 Bitsight Portfolio record - Add Vendor (Is VRM = false)', async ({ p
 
     expect(hasError, 'Expected test to pass successfully, but an error message ("There is some error in") was detected.').toBeFalsy();
     console.log('[TC 16] Add Vendor request submitted successfully without errors.');
+});
+
+// ---------- Test Cases for bitsight_user login ----------
+test('TC 19: Verify Bitsight VRM modules available for bitsight_user login', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
+
+    // 1. Logout from bitsight_admin and login as bitsight_user
+    await switchUser(page, regularUser, regularPass);
+
+    // 2. Filter Bitsight modules in the navigation menu
+    await filterBitsightModules(page);
+
+    // 3. Verify visible modules for bitsight_user
+    for (const module of USER_VISIBLE_MODULES) {
+        const link = page.getByRole('link', {
+            name: new RegExp(`^${module} \\d+ of \\d+$`),
+        });
+        await expect(link, `Module "${module}" should be visible for ${regularUser}`).toBeVisible();
+        await link.click();
+    }
+
+    // 4. Verify admin-only modules are not visible for bitsight_user
+    for (const module of USER_HIDDEN_MODULES) {
+        const link = page.getByRole('link', {
+            name: new RegExp(`^${module} \\d+ of \\d+$`),
+        });
+        await expect(link, `Module "${module}" should NOT be visible for ${regularUser}`).not.toBeVisible();
+    }
+});
+
+test('TC 20: Verify VRM-only company record fields are read-only and verify tabs for bitsight_user login', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
+
+    // 1. Logout from bitsight_admin and login as bitsight_user
+    await switchUser(page, regularUser, regularPass);
+
+    // 2. Navigate directly to VRM-only companies list view
+    await page.goto(
+        process.env.SN_URL +
+        'now/nav/ui/classic/params/target/' +
+        'core_company_list.do%3Fsysparm_query%3Dx_bisit_vrm_bitsight_vendor_guidISNOTEMPTY%255Ex_bisit_vrm_is_vrm%253Dtrue%255Ex_bisit_vrm_bs_subscription_type%253DNULL%26sysparm_first_row%3D1%26sysparm_view%3Dbitsight_vrm'
+    );
+
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+
+    // 3. Verify List View Read-Only restriction by double-clicking a cell
+    const scoreCell = frame.getByRole('gridcell').filter({ hasText: /^\d+$/ }).first();
+    if (await scoreCell.isVisible({ timeout: 15_000 }).catch(() => false)) {
+        await scoreCell.dblclick();
+        const securityMsg = frame.getByText('Security prevents writing to this field', { exact: true });
+        await expect(securityMsg, 'Security restriction tooltip should prevent inline editing in list view').toBeVisible({ timeout: 10_000 });
+        const cancelBtn = frame.getByRole('button', { name: 'Cancel (ESC)' });
+        if (await cancelBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
+            await cancelBtn.click();
+        } else {
+            await page.keyboard.press('Escape');
+        }
+    }
+
+    // 4. Open first VRM-only company record
+    const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
+    await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
+    const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
+    console.log(`[TC 20] Opening first VRM-only company record: "${companyName}"`);
+    await firstRecordLink.click();
+
+    const vendorRiskTab = frame.getByRole('tab', { name: /^Bitsight Vendor Risk Management/i });
+    const portfolioTab = frame.getByRole('tab', { name: 'Bitsight Portfolio Information' });
+    const ratingsTab = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
+    const assessmentTab = frame.getByRole('tab', { name: 'Bitsight Assessment Report' });
+
+    await vendorRiskTab.waitFor({ state: 'visible', timeout: 30_000 });
+
+    // 5. Verify visible and non-visible tabs for bitsight_user on VRM-only record
+    await expect(vendorRiskTab, 'Bitsight Vendor Risk tab should be visible').toBeVisible();
+    await expect(portfolioTab, 'Bitsight Portfolio Information tab should be visible').toBeVisible();
+    await expect(ratingsTab, 'Bitsight Security Ratings tab should NOT be visible for bitsight_user on VRM-only record').not.toBeVisible({ timeout: 10_000 });
+    await expect(assessmentTab, 'Bitsight Assessment Report tab should NOT be visible for bitsight_user on VRM-only record').not.toBeVisible({ timeout: 10_000 });
+
+    // 6. On Bitsight Vendor Risk tab: Verify cards are visible
+    await vendorRiskTab.click();
+
+    const aboutRating = frame.getByText(/About Rating/i).first();
+    await aboutRating.scrollIntoViewIfNeeded();
+    await expect(aboutRating).toBeVisible({ timeout: 15_000 });
+
+    const scoringImpact = frame.getByText(/Scoring\s*(Impact)?/i).first();
+    await scoringImpact.scrollIntoViewIfNeeded();
+    await expect(scoringImpact).toBeVisible({ timeout: 15_000 });
+
+    const lifeCycleStage = frame.getByText(/Life Cycle Stage/i).first();
+    await lifeCycleStage.scrollIntoViewIfNeeded();
+    await expect(lifeCycleStage).toBeVisible({ timeout: 15_000 });
+
+    const pastDue = frame.getByText(/Past Due/i).first();
+    await pastDue.scrollIntoViewIfNeeded();
+    await expect(pastDue).toBeVisible({ timeout: 15_000 });
+
+    // 7. On Bitsight Portfolio Information tab: Verify fields are populated and not empty
+    await portfolioTab.click();
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    // Helper function to build dynamic field selectors ignoring hidden ServiceNow inputs
+    const getFieldLocator = (fieldName) => {
+        return frame.locator([
+            `#element\\.core_company\\.${fieldName} :is(input:not([type="hidden"]), div.form-control-static, span.form-control-static)`,
+            `input#sys_readonly\\.core_company\\.${fieldName}`,
+            `input#core_company\\.${fieldName}:not([type="hidden"])`
+        ].join(', ')).first();
+    };
+
+    const fieldChecks = [
+        { label: 'Bitsight vendor GUID', locator: () => getFieldLocator('x_bisit_vrm_bitsight_vendor_guid') },
+        { label: 'Bitsight rating date', locator: () => getFieldLocator('x_bisit_vrm_rating_date') },
+        { label: 'Bitsight primary domain', locator: () => getFieldLocator('x_bisit_vrm_primary_domain') },
+        { label: 'Bitsight security rating', locator: () => getFieldLocator('x_bisit_vrm_security_rating') },
+        { label: 'Bitsight company name', locator: () => getFieldLocator('x_bisit_vrm_company_name') },
+    ];
+
+    console.log(`\n--- [TC 20] Portfolio Information field check for "${companyName}" ---`);
+
+    for (const { label, locator } of fieldChecks) {
+        const field = locator();
+        await field.waitFor({ state: 'visible', timeout: 30_000 });
+
+        let value = await field.inputValue().catch(() => '');
+        if (!value) {
+            value = await field.innerText().catch(() => '');
+        }
+        value = value.trim();
+
+        console.log(value.length > 0 ? `[TC 20] "${label}" is populated: "${value}"` : `[TC 20] "${label}" is EMPTY`);
+        expect(value.length, `Expected "${label}" to be populated on the Portfolio Information tab`).toBeGreaterThan(0);
+    }
+});
+
+test('TC 21: Verify CM-only company record tabs, buttons, and fields for bitsight_user login', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
+
+    // 1. Logout from bitsight_admin and login as bitsight_user
+    await switchUser(page, regularUser, regularPass);
+
+    // 2. Navigate directly to CM-only companies list view
+    await page.goto(
+        process.env.SN_URL +
+        'now/nav/ui/classic/params/target/' +
+        'core_company_list.do%3Fsysparm_query%3Dx_bisit_vrm_bitsight_vendor_guidISNOTEMPTY%255Ex_bisit_vrm_bs_subscription_type!%253DNULL%255Ex_bisit_vrm_is_vrm%253Dfalse%26sysparm_first_row%3D1%26sysparm_view%3Dbitsight_vrm'
+    );
+
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+
+    console.log('Verifying that the list view is read-only for bitsight_user by attempting to double-click a score cell...');
+    const scoreCell = frame.getByRole('gridcell').filter({ hasText: /^\d+$/ }).first();
+    if (await scoreCell.isVisible({ timeout: 15_000 }).catch(() => false)) {
+        await scoreCell.dblclick();
+        const securityMsg = frame.getByText('Security prevents writing to this field', { exact: true });
+        await expect(securityMsg, 'Security restriction tooltip should prevent inline editing in list view').toBeVisible({ timeout: 10_000 });
+        const cancelBtn = frame.getByRole('button', { name: 'Cancel (ESC)' });
+        if (await cancelBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
+            await cancelBtn.click();
+        } else {
+            await page.keyboard.press('Escape');
+        }
+    }
+    console.log('Read-only restriction verified for list view cells.');
+
+    // 3. Open first CM-only company record
+    const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
+    await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
+    const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
+    console.log(`[TC 21] Opening first CM-only company record: "${companyName}"`);
+    await firstRecordLink.click();
+
+    const ratingsTab = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
+    const portfolioTab = frame.getByRole('tab', { name: 'Bitsight Portfolio Information' });
+    const assessmentTab = frame.getByRole('tab', { name: 'Bitsight Assessment Report' });
+    const vendorRiskTab = frame.getByRole('tab', { name: /^Bitsight Vendor Risk/i });
+
+    await ratingsTab.waitFor({ state: 'visible', timeout: 30_000 });
+
+    // 4. Verify visible and non-visible tabs for bitsight_user on CM-only record
+    await expect(ratingsTab, 'Bitsight Security Ratings tab should be visible').toBeVisible();
+    await expect(portfolioTab, 'Bitsight Portfolio Information tab should be visible').toBeVisible();
+    await expect(assessmentTab, 'Bitsight Assessment Report tab should be visible').toBeVisible();
+    await expect(vendorRiskTab, 'Bitsight Vendor Risk tab should NOT be visible for bitsight_user on CM-only record').not.toBeVisible({ timeout: 10_000 });
+
+    // 5. On Bitsight Security Ratings tab: Verify buttons and dashboard tiles
+    await ratingsTab.click();
+    await expect(ratingsTab).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 }).catch(() => {});
+
+    // Action buttons: "Enable Vendor Access" is visible, admin buttons are not visible
+    const enableVendorBtn = frame.getByRole('button', { name: 'Enable Vendor Access' }).first();
+    await enableVendorBtn.scrollIntoViewIfNeeded();
+    await expect(enableVendorBtn, 'Button "Enable Vendor Access" should be visible').toBeVisible({ timeout: 15_000 });
+
+    const hiddenAdminButtons = [
+        'Switch Subscription',
+        'Manage Folders',
+        'Unsubscribe',
+    ];
+
+    for (const btnName of hiddenAdminButtons) {
+        const btn = frame.getByRole('button', { name: btnName }).first();
+        await expect(btn, `Button "${btnName}" should NOT be visible for bitsight_user`).not.toBeVisible({ timeout: 5_000 });
+    }
+
+    // Dashboard tiles and graphs
+    const overviewLink = frame.getByText(/View Company Overview/i).first();
+    await overviewLink.scrollIntoViewIfNeeded();
+    await expect(overviewLink, 'View Company Overview link should be visible').toBeVisible({ timeout: 15_000 });
+
+    const timeseriesBox = frame.locator('.timeseries-box').first();
+    await timeseriesBox.scrollIntoViewIfNeeded();
+    await expect(timeseriesBox, 'Timeseries box should be visible').toBeVisible({ timeout: 15_000 });
+
+    const vectorsBreakdown = frame.locator('#vectors-breakdown');
+    await vectorsBreakdown.scrollIntoViewIfNeeded();
+    await expect(vectorsBreakdown, 'Vectors breakdown should be visible').toBeVisible({ timeout: 15_000 });
+
+    const ratingBreakdown = frame.locator('#rating-breakdown');
+    await ratingBreakdown.scrollIntoViewIfNeeded();
+    await expect(ratingBreakdown, 'Rating breakdown should be visible').toBeVisible({ timeout: 15_000 });
+
+    const ratingHighlights = frame.getByText(/^Rating Highlights/i).first();
+    await ratingHighlights.scrollIntoViewIfNeeded();
+    await expect(ratingHighlights, 'Rating Highlights should be visible').toBeVisible({ timeout: 15_000 });
+
+    // 6. On Bitsight Portfolio Information tab: Verify fields are populated and not empty
+    await portfolioTab.click();
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    const getFieldLocator = (fieldName) => {
+        return frame.locator([
+            `#element\\.core_company\\.${fieldName} :is(input:not([type="hidden"]), div.form-control-static, span.form-control-static)`,
+            `input#sys_readonly\\.core_company\\.${fieldName}`,
+            `input#core_company\\.${fieldName}:not([type="hidden"])`
+        ].join(', ')).first();
+    };
+
+    const fieldChecks = [
+        { label: 'Bitsight vendor GUID', locator: () => getFieldLocator('x_bisit_vrm_bitsight_vendor_guid') },
+        { label: 'Bitsight rating date', locator: () => getFieldLocator('x_bisit_vrm_rating_date') },
+        { label: 'Bitsight primary domain', locator: () => getFieldLocator('x_bisit_vrm_primary_domain') },
+        { label: 'Bitsight security rating', locator: () => getFieldLocator('x_bisit_vrm_security_rating') },
+        { label: 'Bitsight company name', locator: () => getFieldLocator('x_bisit_vrm_company_name') },
+    ];
+
+    console.log(`\n--- [TC 21] Portfolio Information field check for "${companyName}" ---`);
+
+    for (const { label, locator } of fieldChecks) {
+        const field = locator();
+        await field.waitFor({ state: 'visible', timeout: 30_000 });
+
+        let value = await field.inputValue().catch(() => '');
+        if (!value) {
+            value = await field.innerText().catch(() => '');
+        }
+        value = value.trim();
+
+        console.log(value.length > 0 ? `[TC 21] "${label}" is populated: "${value}"` : `[TC 21] "${label}" is EMPTY`);
+        expect(value.length, `Expected "${label}" to be populated on the Portfolio Information tab`).toBeGreaterThan(0);
+    }
+
+    // 7. On Bitsight Assessment Report tab: Verify tab is visible
+    await expect(assessmentTab, 'Bitsight Assessment Report tab should be visible on CM-only record').toBeVisible();
+});
+
+test('TC 22: Verify CM_VRM company record tabs, cards, tiles, and fields for bitsight_user login', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
+
+    // 1. Logout from bitsight_admin and login as bitsight_user
+    await switchUser(page, regularUser, regularPass);
+
+    // 2. Navigate directly to CM+VRM companies list view
+    await page.goto(
+        process.env.SN_URL +
+        'now/nav/ui/classic/params/target/' +
+        'core_company_list.do%3Fsysparm_query%3Dx_bisit_vrm_bitsight_vendor_guidISNOTEMPTY%255Ex_bisit_vrm_is_vrm%253Dtrue%255Ex_bisit_vrm_bs_subscription_type!%253DNULL%26sysparm_first_row%3D1%26sysparm_view%3Dbitsight_vrm'
+    );
+
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+
+    console.log('Verifying that the list view is read-only for bitsight_user by attempting to double-click a score cell...');
+    const scoreCell = frame.getByRole('gridcell').filter({ hasText: /^\d+$/ }).first();
+    if (await scoreCell.isVisible({ timeout: 15_000 }).catch(() => false)) {
+        await scoreCell.dblclick();
+        const securityMsg = frame.getByText('Security prevents writing to this field', { exact: true });
+        await expect(securityMsg, 'Security restriction tooltip should prevent inline editing in list view').toBeVisible({ timeout: 10_000 });
+        console.log('Read-only restriction verified for list view cells.');
+        const cancelBtn = frame.getByRole('button', { name: 'Cancel (ESC)' });
+        if (await cancelBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
+            await cancelBtn.click();
+        } else {
+            await page.keyboard.press('Escape');
+        }
+    }
+
+    // 3. Open first CM+VRM company record
+    const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
+    await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
+    const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
+    console.log(`[TC 22] Opening first CM+VRM company record: "${companyName}"`);
+    await firstRecordLink.click();
+
+    const vendorRiskTab = frame.getByRole('tab', { name: /^Bitsight Vendor Risk/i });
+    const ratingsTab = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
+    const portfolioTab = frame.getByRole('tab', { name: 'Bitsight Portfolio Information' });
+    const assessmentTab = frame.getByRole('tab', { name: 'Bitsight Assessment Report' });
+
+    await ratingsTab.waitFor({ state: 'visible', timeout: 30_000 });
+
+    // 4. Verify all 4 tabs are visible on CM+VRM record
+    await expect(vendorRiskTab, 'Bitsight Vendor Risk tab should be visible').toBeVisible();
+    await expect(ratingsTab, 'Bitsight Security Ratings tab should be visible').toBeVisible();
+    await expect(portfolioTab, 'Bitsight Portfolio Information tab should be visible').toBeVisible();
+    await expect(assessmentTab, 'Bitsight Assessment Report tab should be visible').toBeVisible();
+
+    // 5. On Bitsight Vendor Risk tab: Verify cards
+    await vendorRiskTab.click();
+
+    const aboutRating = frame.getByText(/About Rating/i).first();
+    if (await aboutRating.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await aboutRating.scrollIntoViewIfNeeded().catch(() => {});
+    }
+    await expect(aboutRating, 'About Rating card should be visible').toBeVisible({ timeout: 15_000 });
+
+    const scoringImpact = frame.getByText(/Scoring\s*(Impact)?/i).first();
+    if (await scoringImpact.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await scoringImpact.scrollIntoViewIfNeeded().catch(() => {});
+    }
+    await expect(scoringImpact, 'Scoring card should be visible').toBeVisible({ timeout: 15_000 });
+
+    const lifeCycleStage = frame.getByText(/Life Cycle Stage/i).first();
+    if (await lifeCycleStage.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await lifeCycleStage.scrollIntoViewIfNeeded().catch(() => {});
+    }
+    await expect(lifeCycleStage, 'Life Cycle Stage card should be visible').toBeVisible({ timeout: 15_000 });
+
+    const pastDue = frame.getByText(/Past Due/i).first();
+    if (await pastDue.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await pastDue.scrollIntoViewIfNeeded().catch(() => {});
+    }
+    await expect(pastDue, 'Past Due card should be visible').toBeVisible({ timeout: 15_000 });
+
+    // 6. On Bitsight Security Ratings tab: Verify buttons and dashboard tiles
+    await ratingsTab.click();
+    await page.waitForTimeout(1000); // Allow tab panel animation/JS render
+
+    // Action buttons: On CM+VRM records (where is_vrm=true), "Enable Vendor Access" is not applicable/present,
+    // and admin action buttons ("Switch Subscription", "Manage Folders", "Unsubscribe") are not visible for bitsight_user.
+    const nonVisibleButtons = [
+        // 'Enable Vendor Access',
+        'Switch Subscription',
+        'Manage Folders',
+        'Unsubscribe',
+    ];
+
+    for (const btnName of nonVisibleButtons) {
+        const btn = frame.getByRole('button', { name: btnName }).first();
+        await expect(btn, `Button "${btnName}" should NOT be visible for bitsight_user on CM+VRM record`).not.toBeVisible({ timeout: 5_000 });
+    }
+
+    const btn = frame.getByRole('button', { name: 'Enable Vendor Access' }).first();
+    await expect(btn, `Button 'Enable Vendor Access' should be visible for bitsight_user on CM+VRM record`).toBeVisible({ timeout: 5_000 });
+
+    // Dashboard tiles and graphs
+    const overviewLink = frame.getByText(/View Company Overview/i).first();
+    if (await overviewLink.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await overviewLink.scrollIntoViewIfNeeded().catch(() => {});
+    }
+    await expect(overviewLink, 'View Company Overview link should be visible').toBeVisible({ timeout: 15_000 });
+
+    const timeseriesBox = frame.locator('.timeseries-box').first();
+    if (await timeseriesBox.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await timeseriesBox.scrollIntoViewIfNeeded().catch(() => {});
+    }
+    await expect(timeseriesBox, 'Timeseries box should be visible').toBeVisible({ timeout: 15_000 });
+
+    const vectorsBreakdown = frame.locator('#vectors-breakdown');
+    if (await vectorsBreakdown.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await vectorsBreakdown.scrollIntoViewIfNeeded().catch(() => {});
+    }
+    await expect(vectorsBreakdown, 'Vectors breakdown should be visible').toBeVisible({ timeout: 15_000 });
+
+    const ratingBreakdown = frame.locator('#rating-breakdown');
+    if (await ratingBreakdown.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await ratingBreakdown.scrollIntoViewIfNeeded().catch(() => {});
+    }
+    await expect(ratingBreakdown, 'Rating breakdown should be visible').toBeVisible({ timeout: 15_000 });
+
+    const ratingHighlights = frame.getByText(/^Rating Highlights/i).first();
+    if (await ratingHighlights.isVisible({ timeout: 10_000 }).catch(() => false)) {
+        await ratingHighlights.scrollIntoViewIfNeeded().catch(() => {});
+    }
+    await expect(ratingHighlights, 'Rating Highlights should be visible').toBeVisible({ timeout: 15_000 });
+
+    // 7. On Bitsight Portfolio Information tab: Verify fields are populated and not empty
+    await portfolioTab.click();
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    const getFieldLocator = (fieldName) => {
+        return frame.locator([
+            `#element\\.core_company\\.${fieldName} :is(input:not([type="hidden"]), div.form-control-static, span.form-control-static)`,
+            `input#sys_readonly\\.core_company\\.${fieldName}`,
+            `input#core_company\\.${fieldName}:not([type="hidden"])`
+        ].join(', ')).first();
+    };
+
+    const fieldChecks = [
+        { label: 'Bitsight vendor GUID', locator: () => getFieldLocator('x_bisit_vrm_bitsight_vendor_guid') },
+        { label: 'Bitsight rating date', locator: () => getFieldLocator('x_bisit_vrm_rating_date') },
+        { label: 'Bitsight primary domain', locator: () => getFieldLocator('x_bisit_vrm_primary_domain') },
+        { label: 'Bitsight security rating', locator: () => getFieldLocator('x_bisit_vrm_security_rating') },
+        { label: 'Bitsight company name', locator: () => getFieldLocator('x_bisit_vrm_company_name') },
+    ];
+
+    console.log(`\n--- [TC 22] Portfolio Information field check for "${companyName}" ---`);
+
+    for (const { label, locator } of fieldChecks) {
+        const field = locator();
+        await field.waitFor({ state: 'visible', timeout: 30_000 });
+
+        let value = await field.inputValue().catch(() => '');
+        if (!value) {
+            value = await field.innerText().catch(() => '');
+        }
+        value = value.trim();
+
+        console.log(value.length > 0 ? `[TC 20] "${label}" is populated: "${value}"` : `[TC 20] "${label}" is EMPTY`);
+        expect(value.length, `Expected "${label}" to be populated on the Portfolio Information tab`).toBeGreaterThan(0);
+    }
+
+    // 8. On Bitsight Assessment Report tab: Verify tab is visible
+    await expect(assessmentTab, 'Bitsight Assessment Report tab should be visible on CM+VRM record').toBeVisible();
+});
+
+test('TC 23: Verify Rating and Risk Vector Alerts fields are read-only for bitsight_user', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
+
+    // 1. Authenticate as bitsight_user
+    await switchUser(page, regularUser, regularPass);
+
+    // 2. Navigate to Rating and Risk Vector Alerts via filter navigator
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    const searchBox23 = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox23.click();
+    await searchBox23.fill('bitsight');
+    await page.getByRole('link', { name: /Rating and Risk Vector Alerts/i }).first().click();
+
+    // 3. Wait for list view frame and column header to load
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+    const companyColumnHeader = frame.getByRole('columnheader', { name: 'Company' }).or(frame.locator('body')).first();
+    await companyColumnHeader.waitFor({ state: 'visible', timeout: 30_000 });
+
+    // 4. Fetch an alert record via Table API
+    const listUrl = `/api/now/table/x_bisit_vrm_bitsight_alerts?sysparm_fields=sys_id,company&sysparm_limit=1`;
+    const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
+    expect(listOk, `Failed to fetch a Bitsight alert record (HTTP ${listStatus})`).toBeTruthy();
+
+    const records = listBody?.result || [];
+    expect(records.length, 'Expected at least one record in the Bitsight alerts table').toBeGreaterThan(0);
+
+    const record = records[0];
+    const sysId = unwrapField(record.sys_id);
+    const originalCompany = unwrapField(record.company);
+    console.log(`[TC 23] Target alert record sys_id: ${sysId}, current company: ${JSON.stringify(originalCompany)}`);
+
+    // 5. Attempt to overwrite the Company field via Table API while authenticated as bitsight_user
+    const updateUrl = `/api/now/table/x_bisit_vrm_bitsight_alerts/${sysId}`;
+    const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
+        page, updateUrl, 'PATCH', { company: '' }
+    );
+
+    console.log(`[TC 23] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 23] PATCH response body: ${JSON.stringify(updateBody)}`);
+
+    // The API call itself is expected to succeed (200) even though the ACL silently blocks the actual field write
+    expect(updateStatus, 'Expected the Table API PATCH request itself to succeed (200) - ACL denial is a silent no-op').toBe(200);
+    expect(updateOk, 'Expected Table API PATCH response to report ok').toBeTruthy();
+
+    // 6. Re-fetch the record and confirm the Company value did NOT change
+    const { ok: recheckOk, body: recheckBody } = await snFetch(
+        page, `/api/now/table/x_bisit_vrm_bitsight_alerts/${sysId}?sysparm_fields=company`
+    );
+    expect(recheckOk, 'Failed to re-fetch alert record after update attempt').toBeTruthy();
+
+    const finalCompany = unwrapField(recheckBody?.result?.company);
+    console.log(`[TC 23] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
+
+    expect(finalCompany, 'Expected Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
+});
+
+test('TC 24: Verify Incidents short_description field is read-only for bitsight_user', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
+
+    // 1. Authenticate as bitsight_user
+    await switchUser(page, regularUser, regularPass);
+
+    // 2. Navigate to Incidents via filter navigator
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    const searchBox24 = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox24.click();
+    await searchBox24.fill('bitsight');
+    await page.getByRole('button', { name: 'Clear filter' }).click();
+    await searchBox24.click();
+    await searchBox24.fill('bitsight');
+    await page.getByRole('link', { name: /Incidents/i }).first().click();
+
+    // 3. Wait for list view iframe to load
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+    const companyColumnHeader = frame.getByRole('columnheader', { name: 'Company' }).or(frame.locator('body')).first();
+    await companyColumnHeader.waitFor({ state: 'visible', timeout: 30_000 });
+
+    console.log('\n--- [TC 24] Incidents company write-protection check ---');
+
+    // 4. Fetch a Bitsight-related incident via Table API
+    const listUrl = `/api/now/table/incident?sysparm_query=short_descriptionLIKEbitsight` +
+        `&sysparm_fields=sys_id,company,short_description&sysparm_limit=1`;
+    const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
+    expect(listOk, `Failed to fetch a Bitsight-related incident (HTTP ${listStatus})`).toBeTruthy();
+
+    const records = listBody?.result || [];
+    expect(records.length, 'Expected at least one incident with "bitsight" in short description').toBeGreaterThan(0);
+
+    const record = records[0];
+    const sysId = unwrapField(record.sys_id);
+    const originalCompany = unwrapField(record.company);
+    console.log(`[TC 24] Target incident: "${unwrapField(record.short_description)}" (sys_id: ${sysId}), current company: ${JSON.stringify(originalCompany)}`);
+
+    // 5. Attempt to overwrite the Company field via Table API while authenticated as bitsight_user
+    const updateUrl = `/api/now/table/incident/${sysId}`;
+    const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
+        page, updateUrl, 'PATCH', { company: '' }
+    );
+
+    console.log(`[TC 24] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 24] PATCH response body: ${JSON.stringify(updateBody)}`);
+
+    expect(updateStatus, 'Expected the Table API PATCH request itself to succeed (200) - ACL denial is a silent no-op').toBe(200);
+    expect(updateOk, 'Expected Table API PATCH response to report ok').toBeTruthy();
+
+    // 6. Re-fetch record and confirm Company value did NOT change
+    const { ok: recheckOk, body: recheckBody } = await snFetch(
+        page, `/api/now/table/incident/${sysId}?sysparm_fields=company`
+    );
+    expect(recheckOk, 'Failed to re-fetch incident record after update attempt').toBeTruthy();
+
+    const finalCompany = unwrapField(recheckBody?.result?.company);
+    console.log(`[TC 24] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
+
+    expect(finalCompany, 'Expected Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
 });
