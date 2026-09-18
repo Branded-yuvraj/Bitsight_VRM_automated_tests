@@ -21,26 +21,168 @@ const MODULES = [
     'App Privacy Policy',
 ];
 
-// Shared navigation: search for "bitsight" in the nav filter so module links are visible
 async function filterBitsightModules(page) {
-    await page.goto('/', { waitUntil: 'domcontentloaded' });
-    await page.getByText('All').first().click();
+  await page.goto('/', { waitUntil: 'networkidle' });
+  
+  const allMenu = page.getByText('All').first();
+  await allMenu.click();
 
-    // Nudge mouse to dismiss any overlay
-    await page.mouse.move(100, 100);
-    await page.mouse.move(200, 200);
+  const pinButton = page.getByRole('button', { name: 'Pin All menu', exact: true }).first();
+  
+  if (await pinButton.isVisible()) {
+      await pinButton.click();
+  }
 
-    const filter = page.getByRole('textbox', { name: 'Enter search term to filter' });
-    await filter.click();
-    await filter.fill('bitsight');
-    await filter.press('Enter');
+  const filter = page.getByRole('textbox', { name: 'Enter search term to filter' });
+  await expect(filter).toBeVisible();
+  await filter.fill('bitsight');
+  await filter.press('Enter');
+}
+
+// Centralized navigation helpers using .first() to prevent strict mode violations
+async function navigateToApplicationConfiguration(page) {
+    await filterBitsightModules(page);
+    await page.getByRole('link', { name: /^Application Configuration \d+ of \d+$/ }).first().click();
+}
+
+async function navigateToScheduledDataImports(page) {
+    await filterBitsightModules(page);
+    await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).first().click();
+}
+
+/**
+ * Reusable helper to set Application Configuration properties in ServiceNow UI,
+ * save the form, and return the verified saved values.
+ */
+async function configureApplicationProperties(page, options = {}) {
+    await navigateToApplicationConfiguration(page);
+
+    const configFrame = page.frameLocator('iframe[name="gsft_main"]');
+
+    if (options.ins_company !== undefined) {
+        await configFrame.locator(options.ins_company ? '#ins_company_y' : '#ins_company_n').check();
+    }
+    if (options.mark_comp !== undefined) {
+        await configFrame.locator(options.mark_comp ? '#mark_comp_y' : '#mark_comp_n').check();
+    }
+    if (options.assign_incident !== undefined) {
+        await configFrame.locator('#assign-incident').selectOption(options.assign_incident);
+    }
+    if (options.user !== undefined) {
+        const userInput = configFrame.locator('[id="sys_display.user"]');
+        await userInput.click();
+        await userInput.fill('');
+        await userInput.fill(options.user);
+        await userInput.press('Enter');
+    }
+    if (options.caller !== undefined) {
+        const callerInput = configFrame.locator('[id="sys_display.caller"]');
+        await callerInput.click();
+        await callerInput.fill('');
+        await callerInput.fill(options.caller);
+        await callerInput.press('Enter');
+    }
+
+    await page.waitForTimeout(2_000);
+
+    // Save configuration and wait for network/reload
+    await Promise.all([
+        page.waitForLoadState('networkidle'),
+        configFrame.locator('#property_save_btn').click(),
+    ]);
+
+    const savedConfig = {
+        insCompany: await configFrame.locator('#ins_company_y').isChecked().catch(() => null),
+        markComp: await configFrame.locator('#mark_comp_y').isChecked().catch(() => null),
+        userDisplay: await configFrame.locator('[id="sys_display.user"]').inputValue().catch(() => null),
+        callerDisplay: await configFrame.locator('[id="sys_display.caller"]').inputValue().catch(() => null),
+    };
+
+    console.log('Saved Application Configurations:');
+    console.table(savedConfig);
+
+    return savedConfig;
+}
+
+/**
+ * Reusable helper to capture baseline syslog timestamp, trigger Scheduled Portfolio Data Import,
+ * and wait for completion in syslog.
+ */
+async function triggerAndWaitForPortfolioImport(page, serviceNowClient, options = {}) {
+    const IMPORT_JOB_NAME = options.jobName || 'Bitsight Portfolio Import';
+    const COMPLETION_LOG_MESSAGE = options.completionLogMessage || 'Bitsight Portfolios Import Complete';
+    const START_LOG_MESSAGE = options.startLogMessage || 'Bitsight Portfolios Import Begin';
+
+    // 1. Capture baseline timestamp if not passed
+    const baselineSyslogTimestamp = options.baselineTimestamp !== undefined
+        ? options.baselineTimestamp
+        : await serviceNowClient.getLatestLogByMessage(COMPLETION_LOG_MESSAGE);
+
+    // 2. Navigate and trigger import
+    console.log(`\n=== Triggering Scheduled ${IMPORT_JOB_NAME} ===`);
+    await navigateToScheduledDataImports(page);
+
+    const gsftFrame = page.locator('iframe[name="gsft_main"]').contentFrame();
+    const importLink = gsftFrame.getByRole('link', { name: new RegExp(`Open record:.*${IMPORT_JOB_NAME}`) }).first();
+    await importLink.waitFor({ state: 'visible', timeout: 30_000 });
+    await importLink.click();
+
+    const executeBtn = gsftFrame.getByRole('button', { name: 'Execute Now' });
+    await executeBtn.waitFor({ state: 'visible', timeout: 30_000 });
+    await executeBtn.click();
+    console.log(`Triggered "Execute Now" for ${IMPORT_JOB_NAME}.`);
+
+    // 3. Wait for import completion in syslog
+    console.log(`\n=== Waiting for ${IMPORT_JOB_NAME} Completion in syslog ===`);
+    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
+        baselineTimestamp: baselineSyslogTimestamp,
+        logMessage: COMPLETION_LOG_MESSAGE,
+        timeoutMs: options.timeoutMs || 1_500_000,
+        pollIntervalMs: options.pollIntervalMs || 15_000,
+    });
+    expect(completeLog, `${IMPORT_JOB_NAME} completion log should be found in syslog`).toBeTruthy();
+
+    const startLogTimestamp = await serviceNowClient.getLatestLogByMessage(START_LOG_MESSAGE);
+
+    return { baselineTimestamp: baselineSyslogTimestamp, completeLog, startLogTimestamp };
+}
+
+/**
+ * Picks N random core_company records that already have a Bitsight vendor GUID
+ */
+async function getRandomCoreCompaniesWithGuid(serviceNowClient, count = 5, poolLimit = 50) {
+    const records = await serviceNowClient.getTableRecords('core_company', {
+        sysparm_query: 'x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY^ORDERBYDESCsys_updated_on',
+        sysparm_fields: 'sys_id,name,website,x_bisit_vrm_bitsight_vendor_guid',
+        sysparm_limit: poolLimit,
+    });
+
+    const pool = (records || []).map(row => ({
+        sys_id: unwrapField(row.sys_id) || '',
+        name: unwrapField(row.name) || '',
+        website: unwrapField(row.website) || '',
+        guid: unwrapField(row.x_bisit_vrm_bitsight_vendor_guid) || '',
+    })).filter(r => r.sys_id && r.guid);
+
+    const shuffled = [...pool].sort(() => 0.5 - Math.random());
+    return shuffled.slice(0, Math.min(count, shuffled.length));
+}
+
+/**
+ * Queries core_company for any of the given Bitsight GUIDs.
+ */
+async function findCoreCompaniesByGuids(serviceNowClient, guids) {
+    if (!guids.length) return [];
+    const guidQuery = guids.map(g => `x_bisit_vrm_bitsight_vendor_guid=${encodeURIComponent(g)}`).join('^OR');
+    return await serviceNowClient.getTableRecords('core_company', {
+        sysparm_query: guidQuery,
+        sysparm_fields: 'sys_id,name,website,x_bisit_vrm_bitsight_vendor_guid',
+        sysparm_limit: guids.length,
+    });
 }
 
 /**
  * Value comparison helper: Validates that field values match without requiring identical data types
- * Handles numbers (1 vs 1.0 vs "1", ignores decimal point differences e.g. 17.42 vs 17),
- * booleans (false vs "false" vs 0), dates ("2026-09-08T00:00:00Z" vs "2026-09-08"),
- * and case-insensitive trimmed strings.
  */
 function areValuesEqual(v1, v2) {
     const isV1Empty = v1 === null || v1 === undefined || v1 === '';
@@ -68,7 +210,6 @@ function areValuesEqual(v1, v2) {
     const num2 = Number(str2);
     if (!isNaN(num1) && !isNaN(num2)) {
         if (Math.abs(num1 - num2) < 0.001) return true;
-        // Ignore decimals as ServiceNow stores truncated/rounded integer scores
         if (Math.trunc(num1) === Math.trunc(num2) || Math.round(num1) === Math.round(num2)) {
             return true;
         }
@@ -80,7 +221,7 @@ function areValuesEqual(v1, v2) {
         }
     }
 
-    // Date match (e.g. "2026-09-08T00:00:00Z" vs "2026-09-08" or "2026-09-08 12:00:00")
+    // Date match (e.g. "2026-09-08T00:00:00Z" vs "2026-09-08")
     const date1 = str1.split('T')[0].split(' ')[0];
     const date2 = str2.split('T')[0].split(' ')[0];
     if (date1 === date2) return true;
@@ -100,9 +241,9 @@ test('TC-01: Verify all Bitsight VRM modules are reachable', async ({ page }) =>
     }
 });
 
-// Verify that a valid Bitsight token with both CM and VRM licenses validates successfully and reveals the configuration sections
+// Verify that a valid Bitsight token with both CM and VRM licenses validates successfully and reveals config sections
 test('TC-02: Valid Bitsight token CM_VRM validates successfully and reveals config sections', async ({ page }) => {
-    test.setTimeout(240000); // 4 min overall, since validation can take up to ~3 min
+    test.setTimeout(240000);
 
     const token = process.env.CMVRM_TOKEN;
     if (!token) {
@@ -113,7 +254,6 @@ test('TC-02: Valid Bitsight token CM_VRM validates successfully and reveals conf
     await page.getByRole('link', { name: /^Application Configuration \d+ of \d+$/ }).click();
 
     const gsftFrame = page.frameLocator('iframe[name="gsft_main"]');
-
     const tokenField = gsftFrame.locator('#token');
     const clearTokenButton = gsftFrame.getByRole('button', { name: 'Clear Token' });
     const okButton = gsftFrame.getByRole('button', { name: 'OK', exact: true });
@@ -125,8 +265,6 @@ test('TC-02: Valid Bitsight token CM_VRM validates successfully and reveals conf
     if (existingValue.trim() !== '') {
         await clearTokenButton.click();
         await okButton.click();
-
-        // Wait for the field to actually become empty
         await expect(tokenField).toHaveValue('', { timeout: 30_000 });
     }
 
@@ -134,27 +272,24 @@ test('TC-02: Valid Bitsight token CM_VRM validates successfully and reveals conf
     await tokenField.fill(token);
     await gsftFrame.getByRole('button', { name: 'Validate Token' }).click();
 
-    // --- Wait for the Success dialog to appear (validation can take 2-3 min) ---
+    // Wait for Success dialog
     const successDialog = gsftFrame.getByRole('dialog', { name: 'Success' });
     await expect(successDialog).toBeVisible({ timeout: 200000 });
 
-    // Acknowledge it
     const successOkButton = successDialog.getByRole('button', { name: 'OK', exact: true });
     await successOkButton.click();
 
-    // --- Assert: Token field retains the entered value ---
+    // Assert token retained and license table visible
     await expect(tokenField).toHaveValue(token);
 
-    // --- Assert: License status table is visible with both products listed ---
     const licenseTable = gsftFrame.locator('#bs_token').getByRole('table');
     await expect(licenseTable).toBeVisible();
     await expect(licenseTable.getByRole('row', { name: /Continuous Monitoring/ })).toBeVisible();
     await expect(licenseTable.getByRole('row', { name: /Risk Monitoring/ })).toBeVisible();
-
     await expect(licenseTable.getByRole('row', { name: /Continuous Monitoring/ })).toContainText(/\d+\/\d+/);
     await expect(licenseTable.getByRole('row', { name: /Risk Monitoring/ })).toContainText(/\d+\/\d+/);
 
-    // --- Assert: Configuration options section becomes visible post-validation ---
+    // Assert configuration options section is visible
     const configSection = gsftFrame.locator('#bs-tprm-config');
     await expect(configSection).toBeVisible();
     await expect(configSection.getByText('Insert Bitsight companies that do not match existing company records in ServiceNow', { exact: true })).toBeVisible();
@@ -168,7 +303,6 @@ test('TC-02: Valid Bitsight token CM_VRM validates successfully and reveals conf
     await expect(configSection.getByText('Incident Caller', { exact: true })).toBeVisible();
     await expect(configSection.getByRole('button', { name: 'Save' })).toBeVisible();
 
-    // --- Assert: Disable/Clear Token section becomes visible post-validation ---
     const clearTokenSection = gsftFrame.locator('#bs-clear-token');
     await expect(clearTokenSection).toBeVisible();
     await expect(clearTokenSection.getByText('Disable Bitsight Integration', { exact: true })).toBeVisible();
@@ -176,55 +310,32 @@ test('TC-02: Valid Bitsight token CM_VRM validates successfully and reveals conf
     await expect(clearTokenSection.getByRole('button', { name: 'Clear Token' })).toBeVisible();
 });
 
-// Verify that a scheduled import job can be triggered and completes successfully, and that the imported portfolio reconciles with the Bitsight ground truth (CM + VRM)
+// Verify scheduled import job completes and reconciles with Bitsight ground truth (CM + VRM)
 test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ page }) => {
-    test.setTimeout(1_800_000); // 30 minutes for full import + crawl + reconciliation
+    test.setTimeout(1_800_000);
 
     const bitsightClient = new BitsightApiClient();
     const serviceNowClient = new ServiceNowApiClient();
 
-    // -------------------------------------------------------------------------
-    // Pre-Step 1: Clean Up Existing Portfolio in ServiceNow
-    // -------------------------------------------------------------------------
-    console.log('\n=== Pre-Step 1: Cleaning Up Existing Portfolio Records ===');
+    // 1. Clean up existing portfolio in ServiceNow
     await clearPortfolio(serviceNowClient);
 
-    // -------------------------------------------------------------------------
-    // Step 1: Capture Baseline Timestamps
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 1: Capturing Baseline Timestamps ===');
-    const baselineSyslogTimestamp = await serviceNowClient.getLatestImportCompleteLog(page);
     const baselineTriggerTimestamp = new Date().toISOString();
 
-    // -------------------------------------------------------------------------
-    // Step 2: Trigger Scheduled Import
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 2: Triggering Scheduled Portfolio Data Import ===');
-    await filterBitsightModules(page);
-    await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).click();
-
-    const gsftFrame = page.locator('iframe[name="gsft_main"]').contentFrame();
-    const importLink = gsftFrame.getByRole('link', { name: 'Open record: Bitsight' }).nth(2);
-    await importLink.click();
-    await gsftFrame.getByRole('button', { name: 'Execute Now' }).click();
-    console.log('Triggered "Execute Now" for Portfolio Import.');
-
-    // -------------------------------------------------------------------------
-    // Step 3: Wait for Import Completion
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 3: Waiting for Import Completion in syslog ===');
-    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
-        baselineTimestamp: baselineSyslogTimestamp,
-        timeoutMs: 1_500_000,
-        pollIntervalMs: 15_000,
+    // Configure Application Properties
+    const savedConfig = await configureApplicationProperties(page, {
+        ins_company: true,
+        assign_incident: 'user',
+        user: 'abel tuter',
+        caller: 'abraham lincoln',
     });
-    expect(completeLog, 'Import completion log should be found').toBeTruthy();
+    console.log(`[TC-03] Application Properties Configured: ins_company=${savedConfig.insCompany}`);
+
+    // 2. Trigger Scheduled Portfolio Import and wait for completion
+    const { completeLog } = await triggerAndWaitForPortfolioImport(page, serviceNowClient);
     const completionTimestamp = completeLog.sys_created_on;
 
-    // -------------------------------------------------------------------------
-    // Step 4: Build Ground Truth from Bitsight (CM + VRM Resolution)
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 4: Fetching and Resolving Bitsight Ground Truth (CM + VRM) ===');
+    // 3. Build Ground Truth from Bitsight (CM + VRM Resolution)
     const cmCompanies = await bitsightClient.getCompanies();
     const set_CM = new Set(cmCompanies.map(c => c.guid));
     console.log(`Bitsight CM Companies Count (set_CM): ${set_CM.size}`);
@@ -234,7 +345,6 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
 
     const resolved_vrm_guids = await bitsightClient.resolveVrmVendors(vrmVendors);
 
-    // Build Ground truth merged set
     const merged = new Set(set_CM);
     for (const [vendor_guid, bs_guid] of Object.entries(resolved_vrm_guids)) {
         if (bs_guid === null || bs_guid === undefined) {
@@ -245,13 +355,9 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
     }
     console.log(`Bitsight Merged Ground Truth Set Size (merged): ${merged.size}`);
 
-    // Also obtain full ground truth map for Tier 2 sampled validation
     const groundTruth = await bitsightClient.getGroundTruth();
 
-    // -------------------------------------------------------------------------
-    // Step 5: Fetch ServiceNow core_company State & Scoped Failures
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 5: Fetching ServiceNow State & Scoped Failures ===');
+    // 4. Fetch ServiceNow core_company state & scoped failures
     const snCompanies = await serviceNowClient.getBitsightCoreCompanies();
     const imported_count = snCompanies.length;
     const imported_map = new Map(snCompanies.map(c => [c.x_bisit_vrm_bitsight_vendor_guid, c]));
@@ -264,10 +370,7 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
     const failed = new Set(failedLogs.map(l => l.vendorGuid).filter(Boolean));
     console.log(`ServiceNow Scoped Failed Vendor GUIDs Count (failed): ${failed.size}`);
 
-    // -------------------------------------------------------------------------
-    // Step 6: Classify Each Failed vendor_guid into true_missing or degraded
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 6: Classifying Failed Vendor GUIDs ===');
+    // 5. Classify failed vendors into true_missing or degraded
     const true_missing = new Set();
     const degraded = new Set();
 
@@ -284,13 +387,8 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
 
     console.log(`Classification Results: true_missing=${true_missing.size}, degraded=${degraded.size}`);
 
-    // -------------------------------------------------------------------------
-    // Tier 1 Assertion: Total ServiceNow Count Reconciled
-    // -------------------------------------------------------------------------
+    // Tier 1 Assertion: Total ServiceNow count reconciled
     const expected_count = merged.size - true_missing.size;
-    console.log('\n================================================================');
-    console.log('       TIER 1: COMPLETENESS RECONCILIATION SUMMARY              ');
-    console.log('================================================================');
     console.table({
         'CM Portfolios (set_CM)': set_CM.size,
         'VRM Raw Vendors': vrmVendors.length,
@@ -308,25 +406,19 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
         `Expected imported count (${imported_count}) to equal merged ground truth minus true missing (${merged.size} - ${true_missing.size} = ${expected_count})`
     ).toBe(expected_count);
 
-    // -------------------------------------------------------------------------
-    // Tier 1b Assertion: Degraded Vendor Verification (u_is_vrm == false)
-    // -------------------------------------------------------------------------
-    console.log('\n=== Tier 1b: Verifying Degraded Vendors in ServiceNow (CM-only fallback) ===');
+    // Tier 1b Assertion: Degraded vendors (u_is_vrm == false)
     for (const vendor_guid of degraded) {
         const bs_guid = resolved_vrm_guids[vendor_guid];
         const snRec = imported_map.get(bs_guid);
         if (snRec) {
             const companyName = snRec.x_bisit_vrm_company_name || snRec.name || groundTruth.portfolioMap.get(bs_guid)?.name || groundTruth.portfolioMap.get(vendor_guid)?.name || 'Unknown';
             const isVrm = Boolean(snRec.x_bisit_vrm_is_vrm === 'true' || snRec.x_bisit_vrm_is_vrm === true || snRec.u_is_vrm === 'true' || snRec.u_is_vrm === true);
-            console.log(`Degraded vendor: "${companyName}" | vendor_guid: ${vendor_guid} (bs_guid: ${bs_guid}) -> x_bisit_vrm_is_vrm: ${isVrm} (Failed in VRM, imported as CM-only)`);
-            expect.soft(isVrm, `Degraded vendor "${companyName}" (vendor_guid: ${vendor_guid}, bs_guid: ${bs_guid}) should have x_bisit_vrm_is_vrm = false`).toBe(false);
+            console.log(`Degraded vendor: "${companyName}" | vendor_guid: ${vendor_guid} (bs_guid: ${bs_guid}) -> x_bisit_vrm_is_vrm: ${isVrm}`);
+            expect.soft(isVrm, `Degraded vendor "${companyName}" should have x_bisit_vrm_is_vrm = false`).toBe(false);
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Tier 1c Assertion: Successfully Resolved Non-Failed Overlapping Vendors (u_is_vrm == true)
-    // -------------------------------------------------------------------------
-    console.log('\n=== Tier 1c: Verifying Non-Failed Overlapping Vendors (u_is_vrm == true) ===');
+    // Tier 1c Assertion: Overlapping non-failed vendors (u_is_vrm == true)
     for (const [vendor_guid, bs_guid] of Object.entries(resolved_vrm_guids)) {
         if (bs_guid && set_CM.has(bs_guid) && !failed.has(vendor_guid)) {
             const snRec = imported_map.get(bs_guid);
@@ -334,24 +426,16 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
                 const companyName = snRec.x_bisit_vrm_company_name || snRec.name || groundTruth.portfolioMap.get(bs_guid)?.name || 'Unknown';
                 const isVrm = Boolean(snRec.x_bisit_vrm_is_vrm === 'true' || snRec.x_bisit_vrm_is_vrm === true || snRec.u_is_vrm === 'true' || snRec.u_is_vrm === true);
                 console.log(`Overlapping vendor: "${companyName}" | vendor_guid: ${vendor_guid} (bs_guid: ${bs_guid}) -> x_bisit_vrm_is_vrm: ${isVrm}`);
-                expect.soft(isVrm, `Successfully resolved non-failed overlapping vendor "${companyName}" (bs_guid: ${bs_guid}) should have x_bisit_vrm_is_vrm = true`).toBe(true);
+                expect.soft(isVrm, `Overlapping vendor "${companyName}" should have x_bisit_vrm_is_vrm = true`).toBe(true);
             }
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Step 7: Tier 2 - Fetch 15 Random Recently Updated Records from ServiceNow
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 7: Fetching 15 Random Recently Updated Records from ServiceNow ===');
+    // Tier 2: Sample 15 records field-by-field validation
     const sampleRecords = await serviceNowClient.getRandomRecentlyUpdatedCoreCompanies(15, 50);
     expect(sampleRecords.length, 'Expected to retrieve sampled records from ServiceNow').toBeGreaterThan(0);
 
     const lifecycleStagesMap = await bitsightClient.getLifecycleStages();
-
-    // -------------------------------------------------------------------------
-    // Step 8: Field-by-Field Validation for the 15 records against Ground Truth Union
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 8: Validating Sampled Records Field-by-Field against Portfolio Union ===');
     const sampleFieldMismatches = [];
     const sampleValidationSummary = [];
 
@@ -371,7 +455,6 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
             continue;
         }
 
-        // 1. Strictly check is_vrm flag from the ServiceNow imported record
         const isVrm = Boolean(
             actual.x_bisit_vrm_is_vrm === 'true' ||
             actual.x_bisit_vrm_is_vrm === true ||
@@ -379,17 +462,13 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
             actual.u_is_vrm === true
         );
 
-        // 2. Common fields to validate for ALL records (both CM-only and VRM)
         const fieldsToCheck = [
             { key: 'name', snKey: 'x_bisit_vrm_company_name' },
             { key: 'primary_domain', snKey: 'x_bisit_vrm_primary_domain' },
             { key: 'rating', snKey: 'x_bisit_vrm_security_rating' },
             { key: 'rating_date', snKey: 'x_bisit_vrm_rating_date' },
-            // { key: 'u_is_vrm', snKey: 'x_bisit_vrm_is_vrm' },
         ];
 
-        // 3. If is_vrm is true, resolve lifecycle stage & VRM ratings, and append VRM-specific fields
-        //    If is_vrm is false (CM-only), ONLY the 5 common fields above are checked.
         if (isVrm) {
             const stageId = expected.life_cycle_stage_guid || expected.life_cycle_stage_id || expected.lifecycle_stage_id;
             if (stageId && String(stageId).trim() !== '') {
@@ -399,7 +478,6 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
                 expected.life_cycle_stage_name = stageName;
             }
 
-            // Always fetch security rating and rating date via API if missing/empty on expected
             if (expected.rating === null || expected.rating === undefined || expected.rating === '' || !expected.rating_date) {
                 const entityGuid = expected.bs_company_guid || expected.bitsight_vendor_guid || expected.guid || guid;
                 const ratingInfo = await bitsightClient.getVendorRatings(entityGuid);
@@ -427,11 +505,9 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
         }
 
         let recordMismatches = 0;
-
         for (const f of fieldsToCheck) {
             const expVal = expected[f.key] !== undefined ? expected[f.key] : expected[f.snKey];
             const actVal = actual[f.snKey] !== undefined ? actual[f.snKey] : actual[f.key];
-
             const matches = areValuesEqual(expVal, actVal);
 
             if (!matches) {
@@ -456,536 +532,157 @@ test('TC-03: CM_VRM Subscription Type 3 Token Portfolio Import Job', async ({ pa
         });
     }
 
-    // -------------------------------------------------------------------------
-    // Step 9: Print Structured Summary & Assertions
-    // -------------------------------------------------------------------------
-    console.log('\n================================================================');
-    console.log('       TIER 2: 15-RECORD SAMPLE DEEP VALIDATION REPORT          ');
-    console.log('================================================================');
     console.table(sampleValidationSummary);
-
     if (sampleFieldMismatches.length > 0) {
-        console.log('\n--- SAMPLE FIELD MISMATCHES ---');
         console.table(sampleFieldMismatches);
-    } else {
-        console.log('\n✅ All 15 sampled records matched perfectly with Ground Truth!');
     }
-    console.log('================================================================\n');
 
     expect.soft(
         sampleFieldMismatches.length,
-        `Expected 0 field mismatches in 15-record sample, but found ${sampleFieldMismatches.length}. Mismatches: ${JSON.stringify(sampleFieldMismatches, null, 2)}`
+        `Expected 0 field mismatches in 15-record sample, but found ${sampleFieldMismatches.length}`
     ).toBe(0);
 });
 
-// Verify that when ins_company is enabled, unmatched companies from Bitsight are inserted into ServiceNow as new core_company records
-test('TC-04: Verify ins_company flag creates new core_company records for unmatched companies', async ({ page }) => {
-    test.setTimeout(1_800_000); // 30 minutes for full cleanup + config + import + reconciliation
+// Verify unmatched companies are inserted when ins_company flag is enabled
+test('TC-04: Verify unmatched companies are inserted when ins_company flag is enabled', async ({ page }) => {
+    test.setTimeout(1_800_000);
 
     const bitsightClient = new BitsightApiClient();
     const serviceNowClient = new ServiceNowApiClient();
 
-    // -------------------------------------------------------------------------
-    // Pre-Step 1: Clean Up Existing Portfolio in ServiceNow
-    // -------------------------------------------------------------------------
-    console.log('\n=== Pre-Step 1: Cleaning Up Existing Portfolio Records in ServiceNow ===');
-    await clearPortfolio(serviceNowClient);
+    // 1. Pick 5 random companies that already exist in ServiceNow with a Bitsight GUID
+    const recordsToDelete = await getRandomCoreCompaniesWithGuid(serviceNowClient, 5);
+    expect(recordsToDelete.length, 'Expected at least one core_company record with a Bitsight GUID to delete').toBeGreaterThan(0);
+    console.log(`[TC-04] Selected ${recordsToDelete.length} company record(s) with Bitsight GUID to delete:`);
+    console.table(recordsToDelete.map(r => ({ Name: r.name, GUID: r.guid, sys_id: r.sys_id })));
 
-    // -------------------------------------------------------------------------
-    // Pre-Step 2: Configure Application Properties and Ensure ins_company is Set to True
-    // -------------------------------------------------------------------------
-    console.log('\n=== Pre-Step 2: Configuring Application Properties (ins_company = true) ===');
-    await filterBitsightModules(page);
-    await page.getByRole('link', { name: 'Application Configuration 4 of' }).click();
+    // 2. Delete those 5 companies from ServiceNow
+    const sysIdsToDelete = recordsToDelete.map(r => r.sys_id);
+    const deleteResult = await serviceNowClient.deleteRecordsBatch('core_company', sysIdsToDelete);
+    expect(deleteResult.deletedCount, 'All selected records should be successfully deleted').toBe(recordsToDelete.length);
+    const deletedGuids = recordsToDelete.map(r => r.guid);
 
-    const configFrame = page.frameLocator('iframe[name="gsft_main"]');
-
-    // Enable "Insert Bitsight companies that do not match existing company records in ServiceNow"
-    await configFrame.locator('#ins_company_y').check();
-    await configFrame.locator('#assign-incident').selectOption('user');
-    await configFrame.locator('[id="sys_display.user"]').click();
-    await configFrame.locator('[id="sys_display.user"]').fill('');
-    await configFrame.locator('[id="sys_display.user"]').fill('abel tuter');
-    await configFrame.locator('[id="sys_display.caller"]').click();
-    await configFrame.locator('[id="sys_display.caller"]').fill('');
-    await configFrame.locator('[id="sys_display.caller"]').fill('abraham lincoln');
-    await configFrame.getByText('Rules for Automation of Incident creation based on Bitsight AlertsMaximum').click();
-    await page.waitForTimeout(10_000);
-
-    // Save configuration and wait for network/reload
-    await Promise.all([
-        page.waitForLoadState('networkidle'),
-        configFrame.locator('#property_save_btn').click(),
-    ]);
-
-    // Read back and assert ins_company setting is true
-    const insCompanyEnabled = await configFrame.locator('#ins_company_y').isChecked();
-    console.log(`Application Configuration: "Insert unmatched companies" (ins_company): ${insCompanyEnabled}`);
-    expect(insCompanyEnabled, 'Application configuration ins_company should be enabled (true)').toBe(true);
-
-    // -------------------------------------------------------------------------
-    // Step 1: Capture Pre-Import Baseline Snapshot of core_company & Timestamps
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 1: Capturing Pre-Import Baseline Snapshot of core_company ===');
-    const preImportCompanies = await serviceNowClient.getTableRecords('core_company', {
-        fields: 'sys_id,name,x_bisit_vrm_company_name,website,x_bisit_vrm_primary_domain,x_bisit_vrm_bitsight_vendor_guid',
+    // 3. Configure Application Properties: ins_company = true
+    const savedConfig = await configureApplicationProperties(page, {
+        ins_company: true,
+        assign_incident: 'user',
+        user: 'abel tuter',
+        caller: 'abraham lincoln',
     });
-    console.log(`Pre-import existing core_company record count: ${preImportCompanies.length}`);
+    expect(savedConfig.insCompany, 'ins_company flag must be true').toBe(true);
 
-    // Build sets of pre-existing matching criteria (GUIDs, Domains, Names)
-    const existingGuids = new Set();
-    const existingDomains = new Set();
-    const existingNames = new Set();
+    // 4. Trigger Scheduled Portfolio Data Import and wait for completion
+    const { completeLog, baselineTimestamp } = await triggerAndWaitForPortfolioImport(page, serviceNowClient);
 
-    for (const rec of preImportCompanies) {
-        const guid = rec.x_bisit_vrm_bitsight_vendor_guid?.value || rec.x_bisit_vrm_bitsight_vendor_guid;
-        if (guid && typeof guid === 'string' && guid.trim()) {
-            existingGuids.add(guid.trim().toLowerCase());
-        }
+    // 5. Check whether the deleted companies were created again in ServiceNow
+    const reinsertedRecords = await findCoreCompaniesByGuids(serviceNowClient, deletedGuids);
+    const reinsertedGuids = new Set(reinsertedRecords.map(r => unwrapField(r.x_bisit_vrm_bitsight_vendor_guid)));
+    const missingGuids = deletedGuids.filter(g => !reinsertedGuids.has(g));
 
-        const domain = rec.x_bisit_vrm_primary_domain?.value || rec.x_bisit_vrm_primary_domain || rec.website?.value || rec.website;
-        if (domain && typeof domain === 'string' && domain.trim()) {
-            existingDomains.add(domain.trim().toLowerCase().replace(/^https?:\/\//i, '').replace(/^www\./i, ''));
-        }
+    console.log(`[TC-04] Re-inserted records count: ${reinsertedRecords.length} / ${deletedGuids.length}`);
 
-        const name = rec.x_bisit_vrm_company_name?.value || rec.x_bisit_vrm_company_name || rec.name?.value || rec.name;
-        if (name && typeof name === 'string' && name.trim()) {
-            existingNames.add(name.trim().toLowerCase());
+    // If any missing, check if they are in failed company import logs from syslog
+    let missingAccountedFor = 0;
+    if (missingGuids.length > 0) {
+        console.warn(`[TC-04] ${missingGuids.length} company(ies) were not re-inserted: ${missingGuids.join(', ')}`);
+        const failedLogs = await serviceNowClient.getFailedImportCompanies({
+            baselineTimestamp,
+            completionTimestamp: completeLog?.sys_created_on,
+        });
+        const failedVendorGuids = new Set(failedLogs.map(l => l.vendorGuid).filter(Boolean));
+
+        const vrmVendors = await bitsightClient.getVendors().catch(() => []);
+        const resolvedVrmGuids = await bitsightClient.resolveVrmVendors(vrmVendors).catch(() => ({}));
+
+        for (const missingGuid of missingGuids) {
+            const isFailedDirectly = failedVendorGuids.has(missingGuid);
+            const isFailedViaVrm = Object.entries(resolvedVrmGuids).some(
+                ([vGuid, bsGuid]) => bsGuid === missingGuid && failedVendorGuids.has(vGuid)
+            );
+
+            if (isFailedDirectly || isFailedViaVrm) {
+                console.log(`[TC-04] Missing company GUID ${missingGuid} is accounted for in failed vendor import syslog.`);
+                missingAccountedFor++;
+            } else {
+                console.error(`[TC-04] Missing company GUID ${missingGuid} is NOT in failed vendor import syslog!`);
+            }
         }
     }
-
-    console.log(`Pre-import baseline unique entries: GUIDs=${existingGuids.size}, Domains=${existingDomains.size}, Names=${existingNames.size}`);
-
-    const baselineSyslogTimestamp = await serviceNowClient.getLatestImportCompleteLog(page);
-    const baselineTriggerTimestamp = new Date().toISOString();
-
-    // -------------------------------------------------------------------------
-    // Step 2: Trigger Scheduled Data Import (Portfolio Import)
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 2: Triggering Scheduled Portfolio Data Import ===');
-    await filterBitsightModules(page);
-    await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).click();
-
-    const gsftFrame = page.locator('iframe[name="gsft_main"]').contentFrame();
-    const importLink = gsftFrame.getByRole('link', { name: 'Open record: Bitsight' }).nth(2);
-    await importLink.click();
-    await gsftFrame.getByRole('button', { name: 'Execute Now' }).click();
-    console.log('Triggered "Execute Now" for Portfolio Import.');
-
-    // -------------------------------------------------------------------------
-    // Step 3: Wait for Import Completion in syslog
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 3: Waiting for Import Completion in syslog ===');
-    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
-        baselineTimestamp: baselineSyslogTimestamp,
-        timeoutMs: 1_500_000,
-        pollIntervalMs: 15_000,
-    });
-    expect(completeLog, 'Import completion log should be found in syslog').toBeTruthy();
-    const completionTimestamp = completeLog?.sys_created_on;
-
-    // -------------------------------------------------------------------------
-    // Step 4: Fetch Bitsight Ground Truth & Classify Unmatched Records
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 4: Fetching and Resolving Bitsight Ground Truth (CM + VRM) ===');
-    const cmCompanies = await bitsightClient.getCompanies();
-    const set_CM = new Set(cmCompanies.map(c => c.guid));
-    console.log(`Bitsight CM Companies Count (set_CM): ${set_CM.size}`);
-
-    const vrmVendors = await bitsightClient.getVendors();
-    console.log(`Bitsight Raw VRM Vendors Count (vrm_raw): ${vrmVendors.length}`);
-
-    const resolved_vrm_guids = await bitsightClient.resolveVrmVendors(vrmVendors);
-
-    // Build Ground Truth merged set
-    const merged = new Set(set_CM);
-    for (const [vendor_guid, bs_guid] of Object.entries(resolved_vrm_guids)) {
-        if (bs_guid === null || bs_guid === undefined) {
-            merged.add(`unresolved:${vendor_guid}`);
-        } else {
-            merged.add(bs_guid);
-        }
-    }
-    console.log(`Bitsight Merged Ground Truth Set Size (merged): ${merged.size}`);
-
-    // Ground Truth details map for domain / name checking
-    const groundTruth = await bitsightClient.getGroundTruth();
-
-    // Classify incoming Bitsight entities against pre-import baseline
-    let preMatchedCount = 0;
-    let unmatchedCount = 0;
-
-    for (const entityGuid of merged) {
-        const entity = groundTruth.portfolioMap.get(entityGuid);
-        const guid = (entity?.guid || entity?.bitsight_vendor_guid || entity?.vendor_guid || entityGuid || '').toLowerCase();
-        const domain = (entity?.primary_domain || entity?.website || '').toLowerCase().replace(/^https?:\/\//i, '').replace(/^www\./i, '');
-        const name = (entity?.name || entity?.company_name || '').toLowerCase();
-
-        const isMatched = (guid && existingGuids.has(guid)) ||
-            (domain && existingDomains.has(domain)) ||
-            (name && existingNames.has(name));
-
-        if (isMatched) {
-            preMatchedCount++;
-        } else {
-            unmatchedCount++;
-        }
-    }
-
-    console.log(`Bitsight Entity Classification vs Baseline: Pre-Matched=${preMatchedCount}, Unmatched (Expected New Records)=${unmatchedCount}`);
-
-    // -------------------------------------------------------------------------
-    // Step 5: Fetch Scoped Failures from syslog
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 5: Fetching ServiceNow Scoped Failures ===');
-    const failedLogs = await serviceNowClient.getFailedImportCompanies({
-        baselineTimestamp: baselineTriggerTimestamp,
-        completionTimestamp,
-    });
-    const failed = new Set(failedLogs.map(l => l.vendorGuid).filter(Boolean));
-    console.log(`ServiceNow Scoped Failed Vendor GUIDs Count: ${failed.size}`);
-
-    const true_missing = new Set();
-    const degraded = new Set();
-
-    for (const vendor_guid of failed) {
-        const bs_guid = resolved_vrm_guids[vendor_guid];
-        if (bs_guid === null || bs_guid === undefined) {
-            true_missing.add(vendor_guid);
-        } else if (set_CM.has(bs_guid)) {
-            degraded.add(vendor_guid);
-        } else {
-            true_missing.add(vendor_guid);
-        }
-    }
-
-    console.log(`Failure Classification: true_missing=${true_missing.size}, degraded=${degraded.size}`);
-
-    // -------------------------------------------------------------------------
-    // Step 6: Fetch Post-Import ServiceNow core_company State & Verify Count Completeness
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 6: Verifying core_company Newly Created Records Count Completeness ===');
-    const snCompanies = await serviceNowClient.getBitsightCoreCompanies();
-    const imported_count = snCompanies.length;
-    const expected_count = merged.size - true_missing.size;
-
-    console.log('\n================================================================');
-    console.log('   TC-08: ins_company FLAG & core_company RECONCILIATION SUMMARY ');
-    console.log('================================================================');
-    console.table({
-        'Application Configuration (ins_company)': insCompanyEnabled ? 'true (Enabled)' : 'false',
-        'Pre-Import Existing core_company Count': preImportCompanies.length,
-        'Bitsight CM Portfolios': set_CM.size,
-        'Bitsight VRM Raw Vendors': vrmVendors.length,
-        'Bitsight Merged Ground Truth': merged.size,
-        'Unmatched Bitsight Entities (Expected New)': unmatchedCount,
-        'Failed Vendors (syslog)': failed.size,
-        'True Missing Vendors': true_missing.size,
-        'Expected core_company Bitsight Records (merged - true_missing)': expected_count,
-        'Actual core_company Bitsight Records Created': imported_count,
-        'Difference': Math.abs(imported_count - expected_count),
-    });
 
     expect(
-        imported_count,
-        `Expected newly created core_company count (${imported_count}) to equal merged ground truth minus true missing (${merged.size} - ${true_missing.size} = ${expected_count})`
-    ).toBe(expected_count);
-
-    expect(
-        imported_count,
-        'Expected at least one core_company record to be created when ins_company is enabled'
-    ).toBeGreaterThan(0);
+        reinsertedRecords.length + missingAccountedFor,
+        `Expected all ${deletedGuids.length} deleted companies to be reinserted or accounted for in failed imports. Missing: ${missingGuids.join(', ')}`
+    ).toBe(deletedGuids.length);
 });
 
-// Verify when a matching company already exists in ServiceNow, the ins_company flag does not create a duplicate record.
-test('TC-05: Verify ins_company flag does not create duplicate core_company records for pre-existing companies', async ({ page }) => {
-    test.setTimeout(1_800_000); // 30 minutes
+// Verify unmatched companies are NOT inserted when ins_company flag is disabled
+test('TC-05: Verify unmatched companies are NOT inserted when ins_company flag is disabled', async ({ page }) => {
+    test.setTimeout(1_800_000);
 
-    const bitsightClient = new BitsightApiClient();
     const serviceNowClient = new ServiceNowApiClient();
 
-    // -------------------------------------------------------------------------
-    // Step 1: Ensure ins_company Setting is Enabled
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 1: Verifying Application Properties (ins_company = true) ===');
-    await filterBitsightModules(page);
-    await page.getByRole('link', { name: 'Application Configuration 4 of' }).click();
+    // 1. Pick 5 random companies that already exist in ServiceNow with a Bitsight GUID
+    const recordsToDelete = await getRandomCoreCompaniesWithGuid(serviceNowClient, 5);
+    expect(recordsToDelete.length, 'Expected at least one core_company record with a Bitsight GUID to delete').toBeGreaterThan(0);
+    console.log(`[TC-05] Selected ${recordsToDelete.length} company record(s) with Bitsight GUID to delete:`);
+    console.table(recordsToDelete.map(r => ({ Name: r.name, GUID: r.guid, sys_id: r.sys_id })));
 
-    const configFrame = page.frameLocator('iframe[name="gsft_main"]');
-    await configFrame.locator('#ins_company_y').check();
-    await configFrame.locator('#assign-incident').selectOption('user');
-    await configFrame.locator('[id="sys_display.user"]').click();
-    await configFrame.locator('[id="sys_display.user"]').fill('');
-    await configFrame.locator('[id="sys_display.user"]').fill('abel tuter');
-    await configFrame.locator('[id="sys_display.caller"]').click();
-    await configFrame.locator('[id="sys_display.caller"]').fill('');
-    await configFrame.locator('[id="sys_display.caller"]').fill('abraham lincoln');
-    await configFrame.getByText('Rules for Automation of Incident creation based on Bitsight AlertsMaximum').click();
-    await page.waitForTimeout(10_000);
+    // 2. Delete those 5 companies from ServiceNow
+    const sysIdsToDelete = recordsToDelete.map(r => r.sys_id);
+    const deleteResult = await serviceNowClient.deleteRecordsBatch('core_company', sysIdsToDelete);
+    expect(deleteResult.deletedCount, 'All selected records should be successfully deleted').toBe(recordsToDelete.length);
+    const deletedGuids = recordsToDelete.map(r => r.guid);
 
-    await Promise.all([
-        page.waitForLoadState('networkidle'),
-        configFrame.locator('#property_save_btn').click(),
-    ]);
-
-    const insCompanyEnabled = await configFrame.locator('#ins_company_y').isChecked();
-    expect(insCompanyEnabled, 'ins_company flag must be true').toBe(true);
-
-    // -------------------------------------------------------------------------
-    // Step 2: Snapshot Existing core_company Records (No Cleanup)
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 2: Fetching Existing core_company Records ===');
-    const preImportCompanies = await serviceNowClient.getTableRecords('core_company', {
-        fields: 'sys_id,name,website,x_bisit_vrm_primary_domain,x_bisit_vrm_bitsight_vendor_guid,sys_updated_on',
+    // 3. Configure Application Properties: ins_company = false
+    const savedConfig = await configureApplicationProperties(page, {
+        ins_company: false,
+        assign_incident: 'user',
+        user: 'abel tuter',
+        caller: 'abraham lincoln',
     });
-    console.log(`Pre-existing core_company count: ${preImportCompanies.length}`);
-    expect(preImportCompanies.length, 'TC-05 expects pre-existing records from prior runs').toBeGreaterThan(0);
+    expect(savedConfig.insCompany, 'ins_company flag must be false').toBe(false);
 
-    // Index existing records by GUID, normalized Domain, and Name
-    const existingByGuid = new Map();
-    const existingByDomain = new Map();
-    const existingByName = new Map();
+    // 4. Trigger Scheduled Portfolio Data Import and wait for completion
+    await triggerAndWaitForPortfolioImport(page, serviceNowClient);
 
-    for (const rec of preImportCompanies) {
-        const guid = (rec.x_bisit_vrm_bitsight_vendor_guid?.value || rec.x_bisit_vrm_bitsight_vendor_guid || '').trim().toLowerCase();
-        if (guid) existingByGuid.set(guid, rec);
+    // 5. Check whether the deleted companies came back in ServiceNow (expected: 0)
+    const reinsertedRecords = await findCoreCompaniesByGuids(serviceNowClient, deletedGuids);
 
-        const domain = (rec.x_bisit_vrm_primary_domain?.value || rec.x_bisit_vrm_primary_domain || rec.website?.value || rec.website || '')
-            .trim()
-            .toLowerCase()
-            .replace(/^https?:\/\//i, '')
-            .replace(/^www\./i, '')
-            .replace(/\/.*$/, '');
-        if (domain) existingByDomain.set(domain, rec);
+    console.log(
+        reinsertedRecords.length === 0
+            ? `[TC-05] Confirmed: none of the ${deletedGuids.length} deleted companies were reinserted.`
+            : `[TC-05] UNEXPECTED: ${reinsertedRecords.length} deleted companies came back: ${reinsertedRecords.map(r => unwrapField(r.name)).join(', ')}`
+    );
 
-        const name = (rec.name?.value || rec.name || '').trim().toLowerCase();
-        if (name) existingByName.set(name, rec);
-    }
-
-    // -------------------------------------------------------------------------
-    // Step 3: Fetch BitSight Ground Truth & Identify Overlapping Targets
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 3: Cross-referencing BitSight Entities with Existing Records ===');
-    const groundTruth = await bitsightClient.getGroundTruth();
-
-    // Collect specific identifiers that we expect the job to match against
-    const targetMatchedGuids = [];
-    const targetMatchedDomains = [];
-
-    for (const entity of groundTruth.portfolioList) {
-        const guid = (entity.guid || entity.bitsight_vendor_guid || entity.vendor_guid || '').trim().toLowerCase();
-        const domain = (entity.primary_domain || entity.website || '')
-            .trim()
-            .toLowerCase()
-            .replace(/^https?:\/\//i, '')
-            .replace(/^www\./i, '')
-            .replace(/\/.*$/, '');
-
-        if (guid && existingByGuid.has(guid)) {
-            targetMatchedGuids.push(guid);
-        } else if (domain && existingByDomain.has(domain)) {
-            targetMatchedDomains.push(domain);
-        }
-    }
-
-    console.log(`Overlapping entries detected: GUID matches = ${targetMatchedGuids.length}, Domain matches = ${targetMatchedDomains.length}`);
     expect(
-        targetMatchedGuids.length + targetMatchedDomains.length,
-        'Expected at least one BitSight entity to match existing ServiceNow records'
-    ).toBeGreaterThan(0);
-
-    const baselineSyslogTimestamp = await serviceNowClient.getLatestImportCompleteLog(page);
-    const baselineTriggerTimestamp = new Date().toISOString();
-
-    // -------------------------------------------------------------------------
-    // Step 4: Trigger Scheduled Portfolio Data Import
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 4: Triggering Scheduled Data Import ===');
-    await filterBitsightModules(page);
-    await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).click();
-
-    const gsftFrame = page.locator('iframe[name="gsft_main"]').contentFrame();
-    const importLink = gsftFrame.getByRole('link', { name: 'Open record: Bitsight' }).nth(2);
-    await importLink.click();
-    await gsftFrame.getByRole('button', { name: 'Execute Now' }).click();
-
-    // -------------------------------------------------------------------------
-    // Step 5: Wait for Import Completion
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 5: Waiting for Import Completion in syslog ===');
-    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
-        baselineTimestamp: baselineSyslogTimestamp,
-        timeoutMs: 1_500_000,
-        pollIntervalMs: 15_000,
-    });
-    expect(completeLog, 'Import completion log should be found in syslog').toBeTruthy();
-    const completionTimestamp = completeLog?.sys_created_on;
-
-    // -------------------------------------------------------------------------
-    // Step 6: Verify No Duplicates Created & Records Were Updated in Place
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 6: Verifying No Duplicate Records for Pre-existing Entities ===');
-
-    // 1. Check GUID matches: exactly 1 record per GUID, retaining the original sys_id
-    for (const guid of targetMatchedGuids.slice(0, 10)) {
-        const originalRecord = existingByGuid.get(guid);
-        const matchedRecords = await serviceNowClient.getTableRecords('core_company', {
-            query: `x_bisit_vrm_bitsight_vendor_guid=${guid}`,
-            fields: 'sys_id,name,x_bisit_vrm_bitsight_vendor_guid,sys_updated_on',
-        });
-
-        expect.soft(
-            matchedRecords.length,
-            `Expected exactly 1 core_company record for GUID ${guid}, but found ${matchedRecords.length}`
-        ).toBe(1);
-
-        if (matchedRecords.length > 0) {
-            expect.soft(
-                matchedRecords[0].sys_id,
-                `Record with GUID ${guid} should retain original sys_id ${originalRecord.sys_id}`
-            ).toBe(originalRecord.sys_id);
-        }
-    }
-
-    // 2. Check Domain matches: exactly 1 record per domain
-    for (const domain of targetMatchedDomains.slice(0, 10)) {
-        const originalRecord = existingByDomain.get(domain);
-        const matchedRecords = await serviceNowClient.getTableRecords('core_company', {
-            query: `x_bisit_vrm_primary_domain=${domain}^ORwebsiteLIKE${domain}`,
-            fields: 'sys_id,name,website,x_bisit_vrm_primary_domain,sys_updated_on',
-        });
-
-        expect.soft(
-            matchedRecords.length,
-            `Expected exactly 1 core_company record for Domain ${domain}, but found ${matchedRecords.length}`
-        ).toBe(1);
-
-        if (matchedRecords.length > 0) {
-            expect.soft(
-                matchedRecords[0].sys_id,
-                `Record with Domain ${domain} should retain original sys_id ${originalRecord.sys_id}`
-            ).toBe(originalRecord.sys_id);
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Step 7: Net New Insert Count Reconciliation
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 7: Reconciling Total Record Delta ===');
-    const postImportCompanies = await serviceNowClient.getTableRecords('core_company', {
-        fields: 'sys_id',
-    });
-
-    const failedLogs = await serviceNowClient.getFailedImportCompanies({
-        baselineTimestamp: baselineTriggerTimestamp,
-        completionTimestamp,
-    });
-    const failedVendorGuids = new Set(failedLogs.map(l => l.vendorGuid).filter(Boolean));
-
-    const totalMatchedCount = targetMatchedGuids.length + targetMatchedDomains.length;
-    const netNewRecords = postImportCompanies.length - preImportCompanies.length;
-    const maxPossibleNew = groundTruth.portfolioList.length - totalMatchedCount - failedVendorGuids.size;
-
-    console.table({
-        'Pre-existing Records': preImportCompanies.length,
-        'Post-import Total Records': postImportCompanies.length,
-        'Net New Created': netNewRecords,
-        'Entities Matched to Existing': totalMatchedCount,
-        'Failed Vendors': failedVendorGuids.size,
-        'Max Expected New Records': maxPossibleNew,
-    });
-
-    // Newly inserted records cannot exceed total entities minus the ones that matched pre-existing ones
-    expect(netNewRecords).toBeLessThanOrEqual(Math.max(0, maxPossibleNew));
+        reinsertedRecords.length,
+        'Expected 0 deleted companies to be reinserted when ins_company is disabled'
+    ).toBe(0);
 });
 
+// Verify each company is marked as a vendor when mark_company flag is true while importing
 test('TC-06: Verify each company is marked as a vendor when mark_company flag is true while importing', async ({ page }) => {
-    test.setTimeout(1_800_000); // 30 minutes for full cleanup + config + import + reconciliation
+    test.setTimeout(1_800_000);
 
     const serviceNowClient = new ServiceNowApiClient();
-    const IMPORT_JOB_NAME = 'Bitsight Portfolio Import';
 
-    // -------------------------------------------------------------------------
-    // Pre-Step 1: Clean Up Existing Portfolio in ServiceNow
-    // -------------------------------------------------------------------------
-    console.log('\n=== Pre-Step 1: Cleaning Up Existing Portfolio Records in ServiceNow ===');
+    // 1. Clean up existing portfolio in ServiceNow
     await clearPortfolio(serviceNowClient);
 
-    // -------------------------------------------------------------------------
-    // Pre-Step 2: Configure Application Properties (mark_comp = true, ins_company = true)
-    // -------------------------------------------------------------------------
-    console.log('\n=== Pre-Step 2: Configuring Application Properties (mark_comp = true) ===');
-    await filterBitsightModules(page);
-    await page.getByRole('link', { name: /^Application Configuration \d+ of \d+$/ }).click();
-
-    const configFrame = page.frameLocator('iframe[name="gsft_main"]');
-
-    // Enable both insert unmatched companies and mark companies as vendor
-    await configFrame.locator('#ins_company_y').check();
-    await configFrame.locator('#mark_comp_y').check();
-    await configFrame.locator('#assign-incident').selectOption('user');
-
-    const userInput = configFrame.locator('[id="sys_display.user"]');
-    await userInput.fill('abel tuter');
-    await userInput.press('Enter');
-
-    const callerInput = configFrame.locator('[id="sys_display.caller"]');
-    await callerInput.fill('abraham lincoln');
-    await callerInput.press('Enter');
-
-    // Save configuration and wait for reload
-    await Promise.all([
-        page.waitForLoadState('networkidle'),
-        configFrame.locator('#property_save_btn').click(),
-    ]);
-
-    // Read back and assert mark_comp setting is true
-    const markCompEnabled = await configFrame.locator('#mark_comp_y').isChecked();
-    console.log(`Application Configuration: "Mark imported companies as Vendor" (mark_comp): ${markCompEnabled}`);
-    expect(markCompEnabled, 'Application configuration mark_comp should be enabled (true)').toBe(true);
-
-    // -------------------------------------------------------------------------
-    // Step 1: Capture Baseline Timestamps
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 1: Capturing Baseline Timestamps ===');
-    const START_LOG_MESSAGE = 'Bitsight Portfolios Import Begin';
-    const COMPLETION_LOG_MESSAGE = 'Bitsight Portfolios Import Complete';
-
-    const baselineCompleteLogTimestamp = await serviceNowClient.getLatestLogByMessage(COMPLETION_LOG_MESSAGE);
-
-    // -------------------------------------------------------------------------
-    // Step 2: Trigger Scheduled Portfolio Data Import
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 2: Triggering Scheduled Portfolio Data Import ===');
-    await filterBitsightModules(page);
-    await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).click();
-
-    const gsftFrame = page.locator('iframe[name="gsft_main"]').contentFrame();
-    const importLink = gsftFrame.getByRole('link', { name: `Open record: ${IMPORT_JOB_NAME}` }).first();
-    await importLink.click();
-    await gsftFrame.getByRole('button', { name: 'Execute Now' }).click();
-    console.log('Triggered "Execute Now" for Portfolio Import.');
-
-    // -------------------------------------------------------------------------
-    // Step 3: Wait for Import Completion in syslog & Retrieve Import Begin Timestamp
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 3: Waiting for Import Completion in syslog ===');
-    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
-        baselineTimestamp: baselineCompleteLogTimestamp,
-        logMessage: COMPLETION_LOG_MESSAGE,
-        timeoutMs: 1_500_000,
-        pollIntervalMs: 15_000,
+    // 2. Configure Application Properties: ins_company = true, mark_comp = true
+    const savedConfig = await configureApplicationProperties(page, {
+        ins_company: true,
+        mark_comp: true,
+        assign_incident: 'user',
+        user: 'abel tuter',
+        caller: 'abraham lincoln',
     });
-    expect(completeLog, 'Import completion log should be found in syslog').toBeTruthy();
+    expect(savedConfig.markComp, 'mark_comp flag must be true').toBe(true);
 
-    // Query the "Bitsight Portfolios Import Begin" log for this run
-    const startLogTimestamp = await serviceNowClient.getLatestLogByMessage(START_LOG_MESSAGE);
-    console.log(`Import Begin Log sys_created_on: ${startLogTimestamp}`);
+    // 3. Trigger Scheduled Portfolio Data Import and wait for completion
+    const { startLogTimestamp } = await triggerAndWaitForPortfolioImport(page, serviceNowClient);
 
-    // -------------------------------------------------------------------------
-    // Step 4: Verify Newly Created Companies in core_company are Marked as Vendors
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 4: Fetching Newly Created core_company Records ===');
+    // 4. Verify newly created companies in core_company are marked as vendors
     const query = startLogTimestamp
         ? `x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY^sys_created_on>=${startLogTimestamp}`
         : 'x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY';
@@ -995,7 +692,7 @@ test('TC-06: Verify each company is marked as a vendor when mark_company flag is
         sysparm_fields: 'sys_id,name,vendor,x_bisit_vrm_bitsight_vendor_guid,sys_created_on',
     });
 
-    console.log(`Newly created core_company count (created on or after ${startLogTimestamp || 'all'}): ${postImportCompanies.length}`);
+    console.log(`[TC-06] Newly created core_company count: ${postImportCompanies.length}`);
     expect(postImportCompanies.length, 'Expected newly created company records after import').toBeGreaterThan(0);
 
     for (const company of postImportCompanies) {
@@ -1004,93 +701,29 @@ test('TC-06: Verify each company is marked as a vendor when mark_company flag is
     }
 });
 
+// Verify each company is NOT marked as a vendor when mark_company flag is false while importing
 test('TC-07: Verify each company is NOT marked as a vendor when mark_company flag is false while importing', async ({ page }) => {
-    test.setTimeout(1_800_000); // 30 minutes for full cleanup + config + import + reconciliation
+    test.setTimeout(1_800_000);
 
     const serviceNowClient = new ServiceNowApiClient();
-    const IMPORT_JOB_NAME = 'Bitsight Portfolio Import';
 
-    // -------------------------------------------------------------------------
-    // Pre-Step 1: Clean Up Existing Portfolio in ServiceNow
-    // -------------------------------------------------------------------------
-    console.log('\n=== Pre-Step 1: Cleaning Up Existing Portfolio Records in ServiceNow ===');
+    // 1. Clean up existing portfolio in ServiceNow
     await clearPortfolio(serviceNowClient);
 
-    // -------------------------------------------------------------------------
-    // Pre-Step 2: Configure Application Properties (mark_comp = false, ins_company = true)
-    // -------------------------------------------------------------------------
-    console.log('\n=== Pre-Step 2: Configuring Application Properties (mark_comp = false) ===');
-    await filterBitsightModules(page);
-    await page.getByRole('link', { name: /^Application Configuration \d+ of \d+$/ }).click();
-
-    const configFrame = page.frameLocator('iframe[name="gsft_main"]');
-
-    // Enable insert unmatched companies and disable mark companies as vendor
-    await configFrame.locator('#ins_company_y').check();
-    await configFrame.locator('#mark_comp_n').check();
-    await configFrame.locator('#assign-incident').selectOption('user');
-
-    const userInput = configFrame.locator('[id="sys_display.user"]');
-    await userInput.fill('abel tuter');
-    await userInput.press('Enter');
-
-    const callerInput = configFrame.locator('[id="sys_display.caller"]');
-    await callerInput.fill('abraham lincoln');
-    await callerInput.press('Enter');
-
-    // Save configuration and wait for reload
-    await Promise.all([
-        page.waitForLoadState('networkidle'),
-        configFrame.locator('#property_save_btn').click(),
-    ]);
-
-    // Read back and assert mark_comp setting is false
-    const markCompDisabled = await configFrame.locator('#mark_comp_n').isChecked();
-    console.log(`Application Configuration: "Mark imported companies as Vendor" (mark_comp): ${!markCompDisabled}`);
-    expect(markCompDisabled, 'Application configuration mark_comp should be disabled (false)').toBe(true);
-
-    // -------------------------------------------------------------------------
-    // Step 1: Capture Baseline Timestamps
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 1: Capturing Baseline Timestamps ===');
-    const START_LOG_MESSAGE = 'Bitsight Portfolios Import Begin';
-    const COMPLETION_LOG_MESSAGE = 'Bitsight Portfolios Import Complete';
-
-    const baselineCompleteLogTimestamp = await serviceNowClient.getLatestLogByMessage(COMPLETION_LOG_MESSAGE);
-
-    // -------------------------------------------------------------------------
-    // Step 2: Trigger Scheduled Portfolio Data Import
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 2: Triggering Scheduled Portfolio Data Import ===');
-    await filterBitsightModules(page);
-    await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).click();
-
-    const gsftFrame = page.locator('iframe[name="gsft_main"]').contentFrame();
-    const importLink = gsftFrame.getByRole('link', { name: `Open record: ${IMPORT_JOB_NAME}` }).first();
-    await importLink.click();
-    await gsftFrame.getByRole('button', { name: 'Execute Now' }).click();
-    console.log('Triggered "Execute Now" for Portfolio Import.');
-
-    // -------------------------------------------------------------------------
-    // Step 3: Wait for Import Completion in syslog & Retrieve Import Begin Timestamp
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 3: Waiting for Import Completion in syslog ===');
-    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
-        baselineTimestamp: baselineCompleteLogTimestamp,
-        logMessage: COMPLETION_LOG_MESSAGE,
-        timeoutMs: 1_500_000,
-        pollIntervalMs: 15_000,
+    // 2. Configure Application Properties: ins_company = true, mark_comp = false
+    const savedConfig = await configureApplicationProperties(page, {
+        ins_company: true,
+        mark_comp: false,
+        assign_incident: 'user',
+        user: 'abel tuter',
+        caller: 'abraham lincoln',
     });
-    expect(completeLog, 'Import completion log should be found in syslog').toBeTruthy();
+    expect(savedConfig.markComp, 'mark_comp flag must be false').toBe(false);
 
-    // Query the "Bitsight Portfolios Import Begin" log for this run
-    const startLogTimestamp = await serviceNowClient.getLatestLogByMessage(START_LOG_MESSAGE);
-    console.log(`Import Begin Log sys_created_on: ${startLogTimestamp}`);
+    // 3. Trigger Scheduled Portfolio Data Import and wait for completion
+    const { startLogTimestamp } = await triggerAndWaitForPortfolioImport(page, serviceNowClient);
 
-    // -------------------------------------------------------------------------
-    // Step 4: Verify Newly Created Companies in core_company are NOT Marked as Vendors
-    // -------------------------------------------------------------------------
-    console.log('\n=== Step 4: Fetching Newly Created core_company Records ===');
+    // 4. Verify newly created companies in core_company are NOT marked as vendors
     const query = startLogTimestamp
         ? `x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY^sys_created_on>=${startLogTimestamp}`
         : 'x_bisit_vrm_bitsight_vendor_guidISNOTEMPTY';
@@ -1100,7 +733,7 @@ test('TC-07: Verify each company is NOT marked as a vendor when mark_company fla
         sysparm_fields: 'sys_id,name,vendor,x_bisit_vrm_bitsight_vendor_guid,sys_created_on',
     });
 
-    console.log(`Newly created core_company count (created on or after ${startLogTimestamp || 'all'}): ${postImportCompanies.length}`);
+    console.log(`[TC-07] Newly created core_company count: ${postImportCompanies.length}`);
     expect(postImportCompanies.length, 'Expected newly created company records after import').toBeGreaterThan(0);
 
     for (const company of postImportCompanies) {
@@ -1109,7 +742,7 @@ test('TC-07: Verify each company is NOT marked as a vendor when mark_company fla
     }
 });
 
-// Verify the tabs, buttons, and tiles for a CM-only company record in ServiceNow
+// Verify tabs, buttons, and tiles for a CM-only company record in ServiceNow
 test('TC-08: Verify CM-only company record tabs and tiles in ServiceNow', async ({ page }) => {
     test.setTimeout(120_000);
 
@@ -1121,36 +754,30 @@ test('TC-08: Verify CM-only company record tabs and tiles in ServiceNow', async 
 
     const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
 
-    // Open first available CM-only record
     const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
     await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
     const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
     console.log(`[TC-08] Opening first CM-only company record: "${companyName}"`);
     await firstRecordLink.click();
 
-    // Wait for form to load by waiting for a core tab
     const ratingsTab = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
     await ratingsTab.waitFor({ state: 'visible', timeout: 30_000 });
 
-    // 1. Verify all 4 tabs are visible for CM-only record
+    // 1. Verify all 4 tabs are visible
     await expect(frame.getByRole('tab', { name: /^Bitsight Vendor Risk/i })).toBeVisible();
     await expect(ratingsTab).toBeVisible();
     await expect(frame.getByRole('tab', { name: 'Bitsight Portfolio Information' })).toBeVisible();
     await expect(frame.getByRole('tab', { name: 'Bitsight Assessment Report' })).toBeVisible();
 
-    // 2. On Bitsight Vendor Risk tab: Verify "Add Vendor" button is visible
+    // 2. On Bitsight Vendor Risk tab: Verify "Add Vendor" button
     const vendorRiskTab = frame.getByRole('tab', { name: /^Bitsight Vendor Risk/i });
     await vendorRiskTab.click();
     await expect(frame.getByRole('button', { name: 'Add Vendor' })).toBeVisible();
 
-    // 3. On Bitsight Security Ratings tab: Switch tab and wait for panel transition
+    // 3. On Bitsight Security Ratings tab: Verify action buttons and dashboard tiles
     await ratingsTab.click();
+    await expect(ratingsTab).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 }).catch(() => {});
 
-    // Ensure the tab is selected/active
-    await expect(ratingsTab).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 }).catch(() => {
-        // Fallback for older ServiceNow versions without aria-selected
-    });
-    // 3. On Bitsight Security Ratings tab: Verify rating box, timeseries, graphs, breakdown tiles and action buttons for subscribed CM records
     const expectedButtons = [
         'Enable Vendor Access',
         'Switch Subscription',
@@ -1185,7 +812,7 @@ test('TC-08: Verify CM-only company record tabs and tiles in ServiceNow', async 
     await expect(ratingHighlights).toBeVisible({ timeout: 15_000 });
 });
 
-// Verify the tabs, buttons, and cards for a VRM-only company record in ServiceNow
+// Verify tabs, buttons, and cards for a VRM-only company record in ServiceNow
 test('TC-09: Verify VRM-only company record tabs and cards in ServiceNow', async ({ page }) => {
     test.setTimeout(120_000);
 
@@ -1197,31 +824,29 @@ test('TC-09: Verify VRM-only company record tabs and cards in ServiceNow', async
 
     const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
 
-    // Open first available VRM-only record
     const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
     await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
     const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
     console.log(`[TC-09] Opening first VRM-only company record: "${companyName}"`);
     await firstRecordLink.click();
 
-    // Wait for form to load by waiting for a core tab
     const vendorRiskTab = frame.getByRole('tab', { name: /^Bitsight Vendor Risk/i });
     const ratingsTab = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
     await vendorRiskTab.waitFor({ state: 'visible', timeout: 30_000 });
 
-    // 1. Verify visible tabs (Bitsight Assessment Report should NOT be visible for VRM-only)
+    // 1. Verify visible tabs (Assessment Report tab should not be visible for VRM-only)
     await expect(vendorRiskTab).toBeVisible();
     await expect(ratingsTab).toBeVisible();
     await expect(frame.getByRole('tab', { name: 'Bitsight Portfolio Information' })).toBeVisible();
     await expect(frame.getByRole('tab', { name: 'Bitsight Assessment Report', timeout: 15_000 })).not.toBeVisible();
 
-    // 2. On Bitsight Security Ratings tab: Verify "Subscribe" button is visible
+    // 2. On Bitsight Security Ratings tab: Verify "Subscribe" button
     await ratingsTab.click();
     const subscribeBtn = frame.getByRole('button', { name: 'Subscribe' });
     await subscribeBtn.scrollIntoViewIfNeeded();
     await expect(subscribeBtn).toBeVisible({ timeout: 15_000 });
 
-    // 3. On Bitsight Vendor Risk tab: Verify 4 cards (Security Rating Gauge, Scoring, Life Cycle Stage, Past Due)
+    // 3. On Bitsight Vendor Risk tab: Verify 4 cards
     await vendorRiskTab.click();
 
     const aboutRating = frame.getByText(/About Rating/i).first();
@@ -1241,7 +866,7 @@ test('TC-09: Verify VRM-only company record tabs and cards in ServiceNow', async
     await expect(pastDue).toBeVisible({ timeout: 15_000 });
 });
 
-// Verify the tabs, cards, and graph tiles for a Company record that has both CM and VRM data in ServiceNow
+// Verify tabs, cards, and graph tiles for a CM+VRM company record in ServiceNow
 test('TC-10: Verify CM_VRM company record tabs, cards, and tiles in ServiceNow', async ({ page }) => {
     test.setTimeout(120_000);
 
@@ -1253,25 +878,23 @@ test('TC-10: Verify CM_VRM company record tabs, cards, and tiles in ServiceNow',
 
     const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
 
-    // Open first available CM+VRM record
     const firstRecordLink = frame.getByRole('link', { name: /^Open record:/ }).first();
     await firstRecordLink.waitFor({ state: 'visible', timeout: 30_000 });
     const companyName = (await firstRecordLink.innerText()).replace(/^Open record:\s*/, '').trim();
     console.log(`[TC-10] Opening first CM+VRM company record: "${companyName}"`);
     await firstRecordLink.click();
 
-    // Wait for form to load by waiting for a core tab
     const vendorRiskTab = frame.getByRole('tab', { name: /^Bitsight Vendor Risk/i });
     const ratingsTab = frame.getByRole('tab', { name: 'Bitsight Security Ratings' });
     await ratingsTab.waitFor({ state: 'visible', timeout: 30_000 });
 
-    // 1. Verify all 4 tabs are visible for CM+VRM record
+    // 1. Verify all 4 tabs are visible
     await expect(vendorRiskTab).toBeVisible();
     await expect(ratingsTab).toBeVisible();
     await expect(frame.getByRole('tab', { name: 'Bitsight Portfolio Information' })).toBeVisible();
     await expect(frame.getByRole('tab', { name: 'Bitsight Assessment Report' })).toBeVisible();
 
-    // 2. On Bitsight Vendor Risk tab: Verify 4 cards (Security Rating Gauge, Scoring, Life Cycle Stage, Past Due)
+    // 2. On Bitsight Vendor Risk tab: Verify 4 cards
     await vendorRiskTab.click();
 
     const aboutRating = frame.getByText(/About Rating/i).first();
@@ -1290,7 +913,7 @@ test('TC-10: Verify CM_VRM company record tabs, cards, and tiles in ServiceNow',
     await pastDue.scrollIntoViewIfNeeded();
     await expect(pastDue).toBeVisible({ timeout: 15_000 });
 
-    // 3. On Bitsight Security Ratings tab: Verify rating box, timeseries, graphs, breakdown tiles and action buttons for subscribed CM records
+    // 3. On Bitsight Security Ratings tab: Verify action buttons and dashboard tiles
     await ratingsTab.click();
 
     const expectedButtons = [
@@ -1325,7 +948,7 @@ test('TC-10: Verify CM_VRM company record tabs, cards, and tiles in ServiceNow',
     const ratingHighlights = frame.getByText(/^Rating Highlights/i).first();
     await ratingHighlights.scrollIntoViewIfNeeded();
     await expect(ratingHighlights).toBeVisible({ timeout: 15_000 });
-})
+});
 
 test('TC 11 CM_VRM Bitsight Portfolio record - Unsubscribe, re-lock website, and re-subscribe (Is VRM = false)', async ({ page }) => {
     test.setTimeout(300_000);
