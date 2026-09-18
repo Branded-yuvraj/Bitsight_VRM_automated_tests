@@ -1,4 +1,4 @@
-
+import { expect } from '@playwright/test';
 const BASE_URL = process.env.SN_URL;
 const COMPLETE_MESSAGE = 'Bitsight Portfolios Import Complete';
 
@@ -488,7 +488,7 @@ function classifyBitsightCompanies(bitsightCompanies, coreCompanyRecords) {
 // Returns the gsft_main frame for further interaction.
 async function openApplicationConfiguration(page) {
     await page.goto(BASE_URL);
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
 
     // Nudge the mouse to dismiss any overlay that pops up after this click
     await page.mouse.move(100, 100);
@@ -510,7 +510,7 @@ async function openApplicationConfiguration(page) {
 // Navigates from an already-open Application Configuration screen to the
 // Scheduled Data Imports record and clicks Execute Now.
 async function triggerScheduledImport(page, frame) {
-    await page.getByRole('menuitem', { name: 'All' }).click();
+    await page.getByText('All').first().click();
     await page
         .getByRole('listitem')
         .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
@@ -570,15 +570,34 @@ async function getRandomCoreCompaniesWithGuid(page, count = 5, poolLimit = 50) {
     return shuffled.slice(0, Math.min(count, shuffled.length));
 }
 
-// Deletes the given core_company records by sys_id.
-async function deleteCoreCompanyRecords(page, records) {
-    for (const record of records) {
-        const url = `/api/now/table/core_company/${record.sys_id}`;
-        const { ok, status, body } = await snMutate(page, url, 'DELETE');
+async function deleteCoreCompanyRecords(page, records, batchSize = 50) {
+    for (let i = 0; i < records.length; i += batchSize) {
+        const chunk = records.slice(i, i + batchSize);
+
+        const batchRequest = {
+            batch_request_id: `delete-core-company-${i}`,
+            rest_requests: chunk.map((record, idx) => ({
+                id: String(idx),
+                method: 'DELETE',
+                url: `/api/now/table/core_company/${record.sys_id}`,
+                headers: [{ name: 'Accept', value: 'application/json' }],
+            })),
+        };
+
+        const { ok, status, body } = await snMutate(page, '/api/now/v1/batch', 'POST', batchRequest);
         if (!ok) {
-            throw new Error(`Failed to delete core_company ${record.sys_id} (HTTP ${status}): ${JSON.stringify(body)}`);
+            throw new Error(`Batch delete failed (HTTP ${status}): ${JSON.stringify(body)}`);
         }
-        console.log(`[deleteCoreCompanyRecords] Deleted "${record.name}" (guid: ${record.guid}, sys_id: ${record.sys_id})`);
+
+        // body.serviced_requests is an array of individual responses - check each one
+        for (const res of body.serviced_requests) {
+            const record = chunk[Number(res.id)];
+            if (res.status_code >= 200 && res.status_code < 300) {
+                console.log(`[deleteCoreCompanyRecords] Deleted "${record.name}" (sys_id: ${record.sys_id})`);
+            } else {
+                console.error(`[deleteCoreCompanyRecords] Failed "${record.name}" (sys_id: ${record.sys_id}): HTTP ${res.status_code}`);
+            }
+        }
     }
 }
 
@@ -597,6 +616,154 @@ async function findCoreCompaniesByGuid(page, guids) {
     }
     return body?.result || [];
 }
+
+// Shared navigation: search for "bitsight" in the nav filter so module links are visible
+async function filterBitsightModules(page) {
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.getByText('All').first().click();
+
+    await page.mouse.move(100, 100);
+    await page.mouse.move(200, 200);
+
+    const filter = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await filter.click();
+    await filter.fill('bitsight');
+    await filter.press('Enter');
+}
+
+// Centralized navigation helpers using .first() to prevent strict mode violations when modules are favorited
+async function navigateToApplicationConfiguration(page) {
+    await filterBitsightModules(page);
+    await page.getByRole('link', { name: /^Application Configuration \d+ of \d+$/ }).first().click();
+}
+
+async function navigateToScheduledDataImports(page) {
+    await filterBitsightModules(page);
+    await page.getByRole('link', { name: /^Scheduled Data Imports \d+ of \d+$/ }).first().click();
+}
+
+/**
+ * Reusable helper to set Application Configuration properties in ServiceNow UI,
+ * save the form, and return the verified saved values.
+ */
+async function configureApplicationProperties(page, options = {}) {
+    await navigateToApplicationConfiguration(page);
+
+    const configFrame = page.frameLocator('iframe[name="gsft_main"]');
+
+    // 1. Set form checkbox / radio / input values
+    if (options.ins_company !== undefined) {
+        await configFrame.locator(options.ins_company ? '#ins_company_y' : '#ins_company_n').check();
+    }
+    if (options.mark_comp !== undefined) {
+        await configFrame.locator(options.mark_comp ? '#mark_comp_y' : '#mark_comp_n').check();
+    }
+    if (options.maxpropertyinc !== undefined) {
+        await configFrame.locator('#maxpropertyinc').fill(String(options.maxpropertyinc));
+    }
+    if (options.inc_score !== undefined) {
+        await configFrame.locator(options.inc_score ? '#inc_score_y' : '#inc_score_n').check();
+    }
+    if (options.incscoredrop !== undefined) {
+        await configFrame.locator('#incscoredrop').fill(String(options.incscoredrop));
+    }
+    if (options.critcal_alert_inc !== undefined) {
+        await configFrame.locator(options.critcal_alert_inc ? '#critcal_alert_inc_y' : '#critcal_alert_inc_n').check();
+    }
+    if (options.inc_warn_alert !== undefined) {
+        await configFrame.locator(options.inc_warn_alert ? '#inc_warn_alert_y' : '#inc_warn_alert_n').check();
+    }
+
+    if (options.assign_incident !== undefined) {
+        await configFrame.locator('#assign-incident').selectOption(options.assign_incident);
+    }
+    if (options.user !== undefined) {
+        const userInput = configFrame.locator('[id="sys_display.user"]');
+        await userInput.click();
+        await userInput.fill('');
+        await userInput.fill(options.user);
+        await userInput.press('Enter');
+    }
+    if (options.caller !== undefined) {
+        const callerInput = configFrame.locator('[id="sys_display.caller"]');
+        await callerInput.click();
+        await callerInput.fill('');
+        await callerInput.fill(options.caller);
+        await callerInput.press('Enter');
+    }
+
+    await page.waitForTimeout(2_000);
+
+    // 2. Save and wait for page reload
+    await Promise.all([
+        page.waitForLoadState('networkidle'),
+        configFrame.locator('#property_save_btn').click(),
+    ]);
+
+    // 3. Read back saved configurations
+    const savedConfig = {
+        insCompany: await configFrame.locator('#ins_company_y').isChecked().catch(() => null),
+        markComp: await configFrame.locator('#mark_comp_y').isChecked().catch(() => null),
+        maxPropertyInc: await configFrame.locator('#maxpropertyinc').inputValue().catch(() => null),
+        incScore: await configFrame.locator('#inc_score_y').isChecked().catch(() => null),
+        criticalAlertInc: await configFrame.locator('#critcal_alert_inc_y').isChecked().catch(() => null),
+        incWarnAlert: await configFrame.locator('#inc_warn_alert_y').isChecked().catch(() => null),
+        userDisplay: await configFrame.locator('[id="sys_display.user"]').inputValue().catch(() => null),
+        callerDisplay: await configFrame.locator('[id="sys_display.caller"]').inputValue().catch(() => null),
+    };
+
+    console.log('Saved Application Configurations:');
+    console.table(savedConfig);
+
+    return savedConfig;
+}
+
+/**
+ * Reusable helper to capture baseline syslog timestamp, trigger Scheduled Alerts Import,
+ * and wait for completion in syslog.
+ */
+async function triggerAndWaitForAlertsImport(page, serviceNowClient, options = {}) {
+    const IMPORT_JOB_NAME = options.jobName || 'Bitsight Alerts Import';
+    const COMPLETION_LOG_MESSAGE = options.completionLogMessage || 'Bitsight Alerts Import Complete.';
+
+    // 1. Capture baseline timestamp if not passed
+    const baselineSyslogTimestamp = options.baselineTimestamp !== undefined
+        ? options.baselineTimestamp
+        : await serviceNowClient.getLatestLogByMessage(page, COMPLETION_LOG_MESSAGE);
+
+    // 2. Navigate and trigger import
+    console.log(`\n=== Triggering Scheduled ${IMPORT_JOB_NAME} ===`);
+    await navigateToScheduledDataImports(page);
+
+    const gsftFrame = page.frameLocator('iframe[name="gsft_main"]');
+    const importLink = gsftFrame.getByRole('link', { name: `Open record: ${IMPORT_JOB_NAME}` }).first();
+    await importLink.waitFor({ state: 'visible', timeout: 30_000 });
+    await importLink.click();
+
+    const executeBtn = gsftFrame.getByRole('button', { name: 'Execute Now' });
+    await executeBtn.waitFor({ state: 'visible', timeout: 30_000 });
+    await executeBtn.click();
+    console.log(`Triggered "Execute Now" for ${IMPORT_JOB_NAME}.`);
+
+    // 3. Wait for import completion in syslog
+    console.log(`\n=== Waiting for ${IMPORT_JOB_NAME} Completion in syslog ===`);
+    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
+        baselineTimestamp: baselineSyslogTimestamp,
+        logMessage: COMPLETION_LOG_MESSAGE,
+        timeoutMs: options.timeoutMs || 1_500_000,
+        pollIntervalMs: options.pollIntervalMs || 15_000,
+    });
+    expect(completeLog, `${IMPORT_JOB_NAME} completion log should be found`).toBeTruthy();
+
+    // 4. Optional wait for post-import transform scripts
+    if (options.postWaitMs) {
+        console.log(`Waiting ${options.postWaitMs / 1000}s for post-import transform scripts...`);
+        await page.waitForTimeout(options.postWaitMs);
+    }
+
+    return { baselineTimestamp: baselineSyslogTimestamp, completeLog };
+}
+
 
 export {
     getAllCoreCompaniesWithGuid,
@@ -624,4 +791,9 @@ export {
     getRandomCoreCompaniesWithGuid,
     deleteCoreCompanyRecords,
     findCoreCompaniesByGuid,
+    filterBitsightModules,
+    navigateToApplicationConfiguration,
+    navigateToScheduledDataImports,
+    configureApplicationProperties,
+    triggerAndWaitForAlertsImport,
 };
