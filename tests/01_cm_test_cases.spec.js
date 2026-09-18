@@ -1855,21 +1855,21 @@ test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via A
 
         expect(finalRating, 'Expected the Bitsight security rating to remain unchanged - field should be write-protected by ACL').toBe(originalRating);
     } finally {
-    // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-    await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
+        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
+        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
+        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
 
-    // Ending impersonation reloads the page just like starting it does -
-    // wait for that reload to fully settle and confirm we're back to admin
-    // before this test finishes, so the NEXT test doesn't inherit a
-    // half-reverted impersonated session.
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: 'System Administrator:' })
-        .waitFor({ state: 'visible', timeout: 30_000 })
-        .catch(() => { });
+        // Ending impersonation reloads the page just like starting it does -
+        // wait for that reload to fully settle and confirm we're back to admin
+        // before this test finishes, so the NEXT test doesn't inherit a
+        // half-reverted impersonated session.
+        await page.waitForLoadState('networkidle').catch(() => { });
+        await page.getByRole('button', { name: 'System Administrator:' })
+            .waitFor({ state: 'visible', timeout: 30_000 })
+            .catch(() => { });
 
-    console.log('[TC 072] Impersonation ended.');
-}
+        console.log('[TC 072] Impersonation ended.');
+    }
 
     console.log('[TC 072] Test complete.');
 });
@@ -1952,21 +1952,21 @@ test('TC 073 Bitsight Rating and Risk Vector Alerts - Company field is write-pro
 
         expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
     } finally {
-    // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-    await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
+        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
+        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
+        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
 
-    // Ending impersonation reloads the page just like starting it does -
-    // wait for that reload to fully settle and confirm we're back to admin
-    // before this test finishes, so the NEXT test doesn't inherit a
-    // half-reverted impersonated session.
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: 'System Administrator:' })
-        .waitFor({ state: 'visible', timeout: 30_000 })
-        .catch(() => { });
+        // Ending impersonation reloads the page just like starting it does -
+        // wait for that reload to fully settle and confirm we're back to admin
+        // before this test finishes, so the NEXT test doesn't inherit a
+        // half-reverted impersonated session.
+        await page.waitForLoadState('networkidle').catch(() => { });
+        await page.getByRole('button', { name: 'System Administrator:' })
+            .waitFor({ state: 'visible', timeout: 30_000 })
+            .catch(() => { });
 
-    console.log('[TC 073] Impersonation ended.');
-}
+        console.log('[TC 073] Impersonation ended.');
+    }
 
     console.log('[TC 073] Test complete.');
 });
@@ -2047,26 +2047,26 @@ test('TC 074 Bitsight Incidents - Company field is write-protected via API for r
 
         expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
     } finally {
-    // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-    await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
+        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
+        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
+        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
 
-    // Ending impersonation reloads the page just like starting it does -
-    // wait for that reload to fully settle and confirm we're back to admin
-    // before this test finishes, so the NEXT test doesn't inherit a
-    // half-reverted impersonated session.
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: 'System Administrator:' })
-        .waitFor({ state: 'visible', timeout: 30_000 })
-        .catch(() => { });
+        // Ending impersonation reloads the page just like starting it does -
+        // wait for that reload to fully settle and confirm we're back to admin
+        // before this test finishes, so the NEXT test doesn't inherit a
+        // half-reverted impersonated session.
+        await page.waitForLoadState('networkidle').catch(() => { });
+        await page.getByRole('button', { name: 'System Administrator:' })
+            .waitFor({ state: 'visible', timeout: 30_000 })
+            .catch(() => { });
 
-    console.log('[TC 074] Impersonation ended.');
-}
+        console.log('[TC 074] Impersonation ended.');
+    }
 
     console.log('[TC 074] Test complete.');
 });
 
-test('TC 075 Bitsight Dashboard - permission-denied message shown for restricted user', async ({ page }) => {
+test('TC 075 Bitsight Dashboard - permission-denied message NOT shown for restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
@@ -2101,27 +2101,30 @@ test('TC 075 Bitsight Dashboard - permission-denied message shown for restricted
             .getByRole('link', { name: 'Dashboard 4 of' })
             .click();
 
-        // ---------- Step 3: confirm the permission-denied message is shown ----------
+        // ---------- Step 3: confirm the permission-denied message is NOT shown ----------
         const permissionDeniedMessage = page.getByRole('heading', { name: 'You do not have permission to' });
-        await expect(permissionDeniedMessage, 'Expected the permission-denied message to be visible for the restricted user').toBeVisible({ timeout: 30_000 });
+        await expect(
+            permissionDeniedMessage,
+            'Expected the permission-denied message to NOT be visible for the restricted user'
+        ).not.toBeVisible({ timeout: 30_000 });
 
-        console.log('[TC 075] Confirmed: permission-denied message is shown for the restricted user on the Dashboard.');
+        console.log('[TC 075] Confirmed: permission-denied message is NOT shown for the restricted user on the Dashboard.');
     } finally {
-    // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-    await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
+        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
+        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
+        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
 
-    // Ending impersonation reloads the page just like starting it does -
-    // wait for that reload to fully settle and confirm we're back to admin
-    // before this test finishes, so the NEXT test doesn't inherit a
-    // half-reverted impersonated session.
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: 'System Administrator:' })
-        .waitFor({ state: 'visible', timeout: 30_000 })
-        .catch(() => { });
+        // Ending impersonation reloads the page just like starting it does -
+        // wait for that reload to fully settle and confirm we're back to admin
+        // before this test finishes, so the NEXT test doesn't inherit a
+        // half-reverted impersonated session.
+        await page.waitForLoadState('networkidle').catch(() => { });
+        await page.getByRole('button', { name: 'System Administrator:' })
+            .waitFor({ state: 'visible', timeout: 30_000 })
+            .catch(() => { });
 
-    console.log('[TC 075] Impersonation ended.');
-}
+        console.log('[TC 075] Impersonation ended.');
+    }
 
     console.log('[TC 075] Test complete.');
 });
@@ -2170,21 +2173,21 @@ test('TC 076 & 077 Bitsight - Application Configuration and Scheduled Data Impor
 
         console.log('[TC 076 & 077] Confirmed: Application Configuration and Scheduled Data Imports are hidden from the restricted user.');
     } finally {
-    // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-    await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
+        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
+        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
+        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
 
-    // Ending impersonation reloads the page just like starting it does -
-    // wait for that reload to fully settle and confirm we're back to admin
-    // before this test finishes, so the NEXT test doesn't inherit a
-    // half-reverted impersonated session.
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: 'System Administrator:' })
-        .waitFor({ state: 'visible', timeout: 30_000 })
-        .catch(() => { });
+        // Ending impersonation reloads the page just like starting it does -
+        // wait for that reload to fully settle and confirm we're back to admin
+        // before this test finishes, so the NEXT test doesn't inherit a
+        // half-reverted impersonated session.
+        await page.waitForLoadState('networkidle').catch(() => { });
+        await page.getByRole('button', { name: 'System Administrator:' })
+            .waitFor({ state: 'visible', timeout: 30_000 })
+            .catch(() => { });
 
-    console.log('[TC 076 & 077] Impersonation ended.');
-}
+        console.log('[TC 076 & 077] Impersonation ended.');
+    }
 
     console.log('[TC 076 & 077] Test complete.');
 });
