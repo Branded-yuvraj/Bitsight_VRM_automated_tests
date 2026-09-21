@@ -52,6 +52,10 @@ SN_USER=admin
 SN_PASS=
 SN_URL=https://dev421143.service-now.com/
 
+VRM_USER_BASIC=Don abc
+SN_REGULAR_USER=abc
+SN_REGULAR_PASS=password123 (not actual password)
+
 CM_TOKEN=
 VRM_TOKEN=
 CMVRM_TOKEN=
