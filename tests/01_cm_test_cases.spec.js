@@ -43,7 +43,56 @@ const { ServiceNowApiClient } = require('./utils/servicenow-api-client'); // adj
 
 
 
+test('TC 001 Bitsight invalid token', async ({ page }) => {
+    test.setTimeout(300_000);
 
+    await page.goto(BASE_URL);
+    await page.getByText('All').first().click();
+
+
+    // Nudge the mouse to dismiss any overlay that pops up after this click
+    await page.mouse.move(100, 100);
+    await page.mouse.move(200, 200);
+
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+
+    await page
+        .getByRole('listitem')
+        .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' })
+        .getByLabel('Application Configuration 4 of')
+        .click();
+
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+
+    const tokenInput = frame.locator('#token');
+    const clearTokenButton = frame.getByRole('button', { name: 'Clear Token' });
+    const okButton = frame.getByRole('button', { name: 'OK', exact: true });
+    const validateButton = frame.getByRole('button', { name: 'Validate Token' });
+
+    await tokenInput.click();
+
+    // If a token is already present, clear it first
+    const existingValue = await tokenInput.inputValue();
+    if (existingValue.trim() !== '') {
+        await clearTokenButton.click();
+        await okButton.click();
+
+        // Wait for the field to actually become empty instead of a flat timeout
+        await expect(tokenInput).toHaveValue('', { timeout: 30_000 });
+    }
+
+    await tokenInput.fill('Invalidtoken');
+    await validateButton.click();
+
+    // Validation can take a while — give it up to 2 minutes
+    await expect(frame.getByText('Some temporary technical')).toBeVisible({
+        timeout: 120_000,
+    });
+
+    await okButton.click();
+});
 
 test('TC 002 Bitsight token validation', async ({ page }) => {
     test.setTimeout(300_000);
@@ -1556,7 +1605,7 @@ test('TC 011 Bitsight Assessment Report - template, downloads, and filters', asy
     await backButton.click();
 });
 
-test('TC 049 Unmatched company is not inserted when Insert option is disabled', async ({ page }) => {
+test('TC 012 Unmatched company is not inserted when Insert option is disabled', async ({ page }) => {
     test.setTimeout(900_000);
 
     // ---------- Step 1: navigate to Application Configuration (fresh) ----------
@@ -1600,7 +1649,7 @@ test('TC 049 Unmatched company is not inserted when Insert option is disabled', 
     console.log('[TC 049] Test complete.');
 });
 
-test('TC 050 Unmatched company is inserted when Insert option is enabled', async ({ page }) => {
+test('TC 013 Unmatched company is inserted when Insert option is enabled', async ({ page }) => {
     test.setTimeout(900_000);
 
     // ---------- Step 1: navigate to Application Configuration (fresh) ----------
@@ -1648,7 +1697,7 @@ test('TC 050 Unmatched company is inserted when Insert option is enabled', async
 });
 
 
-test('TC 051 Imported companies are not marked as vendors when Mark as Vendor is disabled', async ({ page }) => {
+test('TC 014 Imported companies are not marked as vendors when Mark as Vendor is disabled', async ({ page }) => {
     test.setTimeout(900_000);
 
     // ---------- Step 1: navigate to Application Configuration (fresh) ----------
@@ -1698,7 +1747,7 @@ test('TC 051 Imported companies are not marked as vendors when Mark as Vendor is
 });
 
 
-test('TC 052 Imported companies are marked as vendors when Mark as Vendor is enabled', async ({ page }) => {
+test('TC 015 Imported companies are marked as vendors when Mark as Vendor is enabled', async ({ page }) => {
     test.setTimeout(900_000);
 
     // ---------- Step 1: navigate to Application Configuration (fresh) ----------
@@ -1747,7 +1796,7 @@ test('TC 052 Imported companies are marked as vendors when Mark as Vendor is ena
     console.log('[TC 052] Test complete.');
 });
 
-test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via API for restricted user', async ({ page }) => {
+test('TC 016 Bitsight Portfolio - Security Rating field is write-protected via API for restricted user', async ({ page }) => {
     test.setTimeout(120_000 + 1_800_000); // original timeout + 30 min for the import
 
     const token = process.env.CM_TOKEN;
@@ -1874,7 +1923,7 @@ test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via A
     console.log('[TC 072] Test complete.');
 });
 
-test('TC 073 Bitsight Rating and Risk Vector Alerts - Company field is write-protected via API for restricted user', async ({ page }) => {
+test('TC 017 Bitsight Rating and Risk Vector Alerts - Company field is write-protected via API for restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
@@ -1971,7 +2020,7 @@ test('TC 073 Bitsight Rating and Risk Vector Alerts - Company field is write-pro
     console.log('[TC 073] Test complete.');
 });
 
-test('TC 074 Bitsight Incidents - Company field is write-protected via API for restricted user', async ({ page }) => {
+test('TC 018 Bitsight Incidents - Company field is write-protected via API for restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
@@ -2066,7 +2115,7 @@ test('TC 074 Bitsight Incidents - Company field is write-protected via API for r
     console.log('[TC 074] Test complete.');
 });
 
-test('TC 075 Bitsight Dashboard - permission-denied message NOT shown for restricted user', async ({ page }) => {
+test('TC 019 Bitsight Dashboard - permission-denied message NOT shown for restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
@@ -2129,7 +2178,7 @@ test('TC 075 Bitsight Dashboard - permission-denied message NOT shown for restri
     console.log('[TC 075] Test complete.');
 });
 
-test('TC 076 & 077 Bitsight - Application Configuration and Scheduled Data Imports hidden from restricted user', async ({ page }) => {
+test('TC 020 & 021 Bitsight - Application Configuration and Scheduled Data Imports hidden from restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
