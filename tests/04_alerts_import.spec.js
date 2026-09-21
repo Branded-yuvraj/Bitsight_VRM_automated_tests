@@ -1086,7 +1086,9 @@ test.describe.serial('Type 3 Token CM_VRM - Alerts Import and Incident Tests', (
         await validateButton.click();
 
         const successDialog = gsftFrame.getByRole('dialog', { name: 'Success' });
-        await expect(successDialog.or(gsftFrame.getByText('API token validated successfully.'))).toBeVisible({
+        const successMessage = gsftFrame.getByText('API token validated successfully.');
+
+        await expect(successDialog.or(successMessage).first()).toBeVisible({
             timeout: 500_000,
         });
 
