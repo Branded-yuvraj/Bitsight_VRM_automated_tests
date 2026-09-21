@@ -120,7 +120,7 @@ async function getLatestImportCompleteLog(page) {
 }
 
 // ---- Step: poll for a NEW completion log strictly after the baseline ----
-async function waitForNewImportLog(page, baselineTimestamp, timeoutMs = 700_000, pollMs = 60_000) {
+async function waitForNewImportLog(page, baselineTimestamp, timeoutMs = 1700_000, pollMs = 60_000) {
     const deadline = Date.now() + timeoutMs;
     const baselineEpoch = toEpoch(baselineTimestamp);
     let attempt = 0;

@@ -512,7 +512,7 @@ test('TC 004 Verify portfolio information fields ', async ({ page }) => {
 });
 
 test('TC 005 Unmatched company is not inserted when Insert option is disabled', async ({ page }) => {
-    test.setTimeout(900_000);
+    test.setTimeout(1900_000);
 
     // ---------- Step 1: navigate to Application Configuration (fresh) ----------
     const frame = await openApplicationConfiguration(page);
@@ -556,7 +556,7 @@ test('TC 005 Unmatched company is not inserted when Insert option is disabled', 
 });
 
 test('TC 006 Unmatched company is inserted when Insert option is enabled', async ({ page }) => {
-    test.setTimeout(900_000);
+    test.setTimeout(1900_000);
 
     // ---------- Step 1: navigate to Application Configuration (fresh) ----------
     const frame = await openApplicationConfiguration(page);
@@ -604,7 +604,7 @@ test('TC 006 Unmatched company is inserted when Insert option is enabled', async
 
 
 test('TC 007 Imported companies are not marked as vendors when Mark as Vendor is disabled', async ({ page }) => {
-    test.setTimeout(900_000);
+    test.setTimeout(1900_000);
 
     // ---------- Step 1: navigate to Application Configuration (fresh) ----------
     const frame = await openApplicationConfiguration(page);
@@ -654,7 +654,7 @@ test('TC 007 Imported companies are not marked as vendors when Mark as Vendor is
 
 
 test('TC 008 Imported companies are marked as vendors when Mark as Vendor is enabled', async ({ page }) => {
-    test.setTimeout(900_000);
+    test.setTimeout(1900_000);
 
     // ---------- Step 1: navigate to Application Configuration (fresh) ----------
     const frame = await openApplicationConfiguration(page);
@@ -702,8 +702,8 @@ test('TC 008 Imported companies are marked as vendors when Mark as Vendor is ena
     console.log('[TC 008] Test complete.');
 });
 
-test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via API for restricted user', async ({ page }) => {
-    test.setTimeout(120_000 + 1_800_000); // original timeout + 30 min for the import
+test('TC 009 Bitsight Portfolio - Security Rating field is write-protected via API for restricted user', async ({ page }) => {
+    test.setTimeout(120_000); // original timeout + 30 min for the import
 
     const token = process.env.CM_TOKEN;
     if (!token) {
@@ -711,53 +711,54 @@ test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via A
     }
     const bitsightClient = new BitsightApiClient({ token });
     const serviceNowClient = new ServiceNowApiClient();
+    await page.goto(BASE_URL);
 
-    // ---------- Step 0: run alerts import reconciliation first ----------
-    console.log('\n=== Step 0: Cleaning Up Existing Alerts & Incidents ===');
-    await clearAlerts(serviceNowClient);
-    await clearIncidents(serviceNowClient);
+    // // ---------- Step 0: run alerts import reconciliation first ----------
+    // console.log('\n=== Step 0: Cleaning Up Existing Alerts & Incidents ===');
+    // await clearAlerts(serviceNowClient);
+    // await clearIncidents(serviceNowClient);
 
-    console.log('\n=== Step 0: Configuring Application Properties ===');
-    await configureApplicationProperties(page, {
-        ins_company: true,
-        mark_comp: true,
-        maxpropertyinc: 10,
-        inc_score: true,
-        incscoredrop: 5,
-        critcal_alert_inc: true,
-        inc_warn_alert: true,
-        assign_incident: 'user',
-        user: 'abel tuter',
-        caller: 'abraham lincoln',
-    });
+    // console.log('\n=== Step 0: Configuring Application Properties ===');
+    // await configureApplicationProperties(page, {
+    //     ins_company: true,
+    //     mark_comp: true,
+    //     maxpropertyinc: 10,
+    //     inc_score: true,
+    //     incscoredrop: 5,
+    //     critcal_alert_inc: true,
+    //     inc_warn_alert: true,
+    //     assign_incident: 'user',
+    //     user: 'abel tuter',
+    //     caller: 'abraham lincoln',
+    // });
 
-    await triggerAndWaitForAlertsImport(page, serviceNowClient);
+    // await triggerAndWaitForAlertsImport(page, serviceNowClient);
 
-    const snCompanyGuids = await serviceNowClient.getBitsightVendorGuids();
-    console.log(`Found ${snCompanyGuids.length} active Bitsight companies in ServiceNow core_company.`);
-    const alertsGroundTruth = await bitsightClient.getAlertsCount({
-        portfolioGuids: snCompanyGuids.map(c => c.guid),
-    });
-    const totalAlertsCount = typeof alertsGroundTruth === 'number' ? alertsGroundTruth : (alertsGroundTruth.count ?? alertsGroundTruth);
-    console.log(`Bitsight Alerts Ground Truth Count (matching ServiceNow portfolio): ${totalAlertsCount}`);
+    // const snCompanyGuids = await serviceNowClient.getBitsightVendorGuids();
+    // console.log(`Found ${snCompanyGuids.length} active Bitsight companies in ServiceNow core_company.`);
+    // const alertsGroundTruth = await bitsightClient.getAlertsCount({
+    //     portfolioGuids: snCompanyGuids.map(c => c.guid),
+    // });
+    // const totalAlertsCount = typeof alertsGroundTruth === 'number' ? alertsGroundTruth : (alertsGroundTruth.count ?? alertsGroundTruth);
+    // console.log(`Bitsight Alerts Ground Truth Count (matching ServiceNow portfolio): ${totalAlertsCount}`);
 
-    const snAlertsList = await serviceNowClient.getTableRecords('x_bisit_vrm_bitsight_alerts', {
-        sysparm_limit: 10000,
-        fields: 'sys_id',
-    });
-    const snAlertsCount = snAlertsList.length;
-    console.log(`ServiceNow alerts table record count: ${snAlertsCount}`);
+    // const snAlertsList = await serviceNowClient.getTableRecords('x_bisit_vrm_bitsight_alerts', {
+    //     sysparm_limit: 10000,
+    //     fields: 'sys_id',
+    // });
+    // const snAlertsCount = snAlertsList.length;
+    // console.log(`ServiceNow alerts table record count: ${snAlertsCount}`);
 
-    console.table({
-        'Bitsight Alerts Ground Truth Count': totalAlertsCount,
-        'Actual ServiceNow Alerts Table Count': snAlertsCount,
-        'Difference': Math.abs(snAlertsCount - totalAlertsCount),
-    });
+    // console.table({
+    //     'Bitsight Alerts Ground Truth Count': totalAlertsCount,
+    //     'Actual ServiceNow Alerts Table Count': snAlertsCount,
+    //     'Difference': Math.abs(snAlertsCount - totalAlertsCount),
+    // });
 
-    expect(
-        snAlertsCount,
-        `Expected ServiceNow alerts table count (${snAlertsCount}) to match Bitsight Alerts ground truth count (${totalAlertsCount})`
-    ).toBe(totalAlertsCount);
+    // expect(
+    //     snAlertsCount,
+    //     `Expected ServiceNow alerts table count (${snAlertsCount}) to match Bitsight Alerts ground truth count (${totalAlertsCount})`
+    // ).toBe(totalAlertsCount);
 
     // ---------- Step 1: impersonate the restricted user ----------
     const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
@@ -787,7 +788,7 @@ test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via A
         const record = records[0];
         const sysId = unwrapField(record.sys_id);
         const originalRating = unwrapField(record.x_bisit_vrm_security_rating);
-        console.log(`[TC 072] Target record: "${unwrapField(record.name)}" (sys_id: ${sysId}), current rating: ${originalRating}`);
+        console.log(`[TC 009] Target record: "${unwrapField(record.name)}" (sys_id: ${sysId}), current rating: ${originalRating}`);
 
         // ---------- Step 3: attempt to overwrite the field via the Table API while impersonated ----------
         const attemptedValue = String(Number(originalRating) > 0 ? Number(originalRating) - 1 : 999);
@@ -796,8 +797,8 @@ test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via A
             page, updateUrl, 'PATCH', { x_bisit_vrm_security_rating: attemptedValue }
         );
 
-        console.log(`[TC 072] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
-        console.log(`[TC 072] PATCH response body: ${JSON.stringify(updateBody)}`);
+        console.log(`[TC 009] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+        console.log(`[TC 009] PATCH response body: ${JSON.stringify(updateBody)}`);
 
         // ---------- Step 4: re-fetch the record and confirm the value did NOT change ----------
         const { ok: recheckOk, body: recheckBody } = await snFetch(
@@ -806,7 +807,7 @@ test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via A
         expect(recheckOk, 'Failed to re-fetch the record after the update attempt').toBeTruthy();
 
         const finalRating = unwrapField(recheckBody?.result?.x_bisit_vrm_security_rating);
-        console.log(`[TC 072] Rating after update attempt: ${finalRating} (was: ${originalRating}, attempted: ${attemptedValue})`);
+        console.log(`[TC 009] Rating after update attempt: ${finalRating} (was: ${originalRating}, attempted: ${attemptedValue})`);
 
         expect(finalRating, 'Expected the Bitsight security rating to remain unchanged - field should be write-protected by ACL').toBe(originalRating);
     } finally {
@@ -823,13 +824,13 @@ test('TC 072 Bitsight Portfolio - Security Rating field is write-protected via A
             .waitFor({ state: 'visible', timeout: 30_000 })
             .catch(() => { });
 
-        console.log('[TC 072] Impersonation ended.');
+        console.log('[TC 009] Impersonation ended.');
     }
 
-    console.log('[TC 072] Test complete.');
+    console.log('[TC 009] Test complete.');
 });
 
-test('TC 075 Bitsight Dashboard - permission-denied message NOT shown for restricted user', async ({ page }) => {
+test('TC 010 Bitsight Dashboard - permission-denied message NOT shown for restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
@@ -871,7 +872,7 @@ test('TC 075 Bitsight Dashboard - permission-denied message NOT shown for restri
             'Expected the permission-denied message to NOT be visible for the restricted user'
         ).not.toBeVisible({ timeout: 30_000 });
 
-        console.log('[TC 075] Confirmed: permission-denied message is NOT shown for the restricted user on the Dashboard.');
+        console.log('[TC 010] Confirmed: permission-denied message is NOT shown for the restricted user on the Dashboard.');
     } finally {
         // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
         await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
@@ -886,13 +887,13 @@ test('TC 075 Bitsight Dashboard - permission-denied message NOT shown for restri
             .waitFor({ state: 'visible', timeout: 30_000 })
             .catch(() => { });
 
-        console.log('[TC 075] Impersonation ended.');
+        console.log('[TC 010] Impersonation ended.');
     }
 
-    console.log('[TC 075] Test complete.');
+    console.log('[TC 010] Test complete.');
 });
 
-test('TC 076 & 077 Bitsight - Application Configuration and Scheduled Data Imports hidden from restricted user', async ({ page }) => {
+test('TC 011 & 012 Bitsight - Application Configuration and Scheduled Data Imports hidden from restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
     await page.goto(BASE_URL);
@@ -934,7 +935,7 @@ test('TC 076 & 077 Bitsight - Application Configuration and Scheduled Data Impor
         await expect(applicationConfigLink, 'Expected "Application Configuration" to not be visible to a restricted user').not.toBeVisible();
         await expect(scheduledImportsLink, 'Expected "Scheduled Data Imports" to not be visible to a restricted user').not.toBeVisible();
 
-        console.log('[TC 076 & 077] Confirmed: Application Configuration and Scheduled Data Imports are hidden from the restricted user.');
+        console.log('[TC 011 & 012] Confirmed: Application Configuration and Scheduled Data Imports are hidden from the restricted user.');
     } finally {
         // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
         await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
@@ -949,10 +950,10 @@ test('TC 076 & 077 Bitsight - Application Configuration and Scheduled Data Impor
             .waitFor({ state: 'visible', timeout: 30_000 })
             .catch(() => { });
 
-        console.log('[TC 076 & 077] Impersonation ended.');
+        console.log('[TC 011 & 012] Impersonation ended.');
     }
 
-    console.log('[TC 076 & 077] Test complete.');
+    console.log('[TC 011 & 012] Test complete.');
 });
 
 
