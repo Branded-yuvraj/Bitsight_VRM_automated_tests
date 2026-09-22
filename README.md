@@ -66,13 +66,14 @@ CMVRM_TOKEN=
 | `SN_USER`     | ServiceNow login username (e.g. `admin`)                                     |
 | `SN_PASS`     | ServiceNow login password                                                     |
 | `SN_URL`      | Base URL of the ServiceNow instance under test                                |
+| `VRM_USER_BASIC` | Username of a restricted (non-admin) ServiceNow user, used for impersonation in role-based access tests |
 | `CM_TOKEN`    | Bitsight API token for **Continuous Monitoring (CM)**-only mode               |
 | `VRM_TOKEN`   | Bitsight API token for **VRM**-only mode                                      |
 | `CMVRM_TOKEN` | Bitsight API token for the combined **CM + VRM** mode                         |
 
 >  **Never commit your `.env` file.** It contains live credentials and tokens. Make sure `.env` is listed in `.gitignore`.
 
-You only need to fill in the token(s) relevant to the test file(s) you intend to run — for example, `04_alerts_import_spec.js` needs both `CM_TOKEN` and `CMVRM_TOKEN`.
+You only need to fill in the token(s) relevant to the test file(s) you intend to run — for example, `04_alerts_import_spec.js` needs both `CM_TOKEN` and `CMVRM_TOKEN`, while `02_vrm_test_cases_spec.js` needs `VRM_TOKEN` (and `VRM_USER_BASIC` for its restricted-user access-control tests).
 
 ---
 
@@ -88,6 +89,7 @@ bs_vrm_playwright/
 └── tests/
     ├── 00_login_setup.spec.js     # Logs into ServiceNow once and saves the session
     ├── 01_cm_test_cases_spec.js   # CM-mode: portfolio, imports, permissions, reports
+    ├── 02_vrm_test_cases_spec.js  # VRM-mode: token validation, portfolio import, record views, permissions
     ├── 03_cm_vrm_token_spec.js    # CM+VRM-mode: module access, imports, record views
     ├── 04_alerts_import_spec.js   # Alerts import & incident-creation rules (Type 1 & Type 3)
     └── utils/                     # Shared helpers (API clients, ServiceNow session helpers, cleanup)
@@ -178,6 +180,7 @@ npx playwright show-trace trace.zip
 |---|---|
 | `00_login_setup.spec.js` | ServiceNow login and session bootstrap |
 | `01_cm_test_cases_spec.js` | CM-only token validation, portfolio import reconciliation against the live Bitsight API, subscription/folder management, assessment reports, and role-based (restricted user) access control |
+| `02_vrm_test_cases_spec.js` | VRM-only token validation; portfolio import completeness reconciliation plus a 15-record field-by-field sample against the live Bitsight API; VRM-only record tab/card layout and Portfolio Information field checks; unmatched-company insert and mark-as-vendor import flag behavior; and role-based (restricted user) access control (write-protected security rating field, hidden Application Configuration/Scheduled Data Imports, Dashboard access) |
 | `03_cm_vrm_token_spec.js` | Combined CM+VRM token validation, module reachability, company-matching/insert/mark-as-vendor import flags, and record layout differences between CM-only, VRM-only, and CM+VRM companies |
 | `04_alerts_import_spec.js` | Alerts import reconciliation and the incident-creation business rules (Critical/Warn severity, Public Disclosure, Security Rating score drops) for both **Type 1 (CM)** and **Type 3 (CM+VRM)** tokens |
 
