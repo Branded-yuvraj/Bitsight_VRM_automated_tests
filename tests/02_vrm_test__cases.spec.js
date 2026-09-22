@@ -69,6 +69,13 @@ async function switchUser(page, username, password) {
 
     await page.getByRole('button', { name: 'Log in' }).click();
     await usernameField.waitFor({ state: 'hidden', timeout: 60_000 });
+
+    // The login form disappearing only means the form was submitted - the
+    // ServiceNow shell (and the session token it exposes to the page) can
+    // still be mid-load for a moment after that. Any snFetch/snMutate call
+    // made too early will pick up a stale/invalid token and fail with a 401,
+    // so make sure the page has actually settled before returning.
+    await page.waitForLoadState('networkidle').catch(() => { });
 }
 
 test('TC 001 Bitsight token validation', async ({ page }) => {

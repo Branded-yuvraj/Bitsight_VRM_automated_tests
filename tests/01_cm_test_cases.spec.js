@@ -70,6 +70,13 @@ async function switchUser(page, username, password) {
 
     await page.getByRole('button', { name: 'Log in' }).click();
     await usernameField.waitFor({ state: 'hidden', timeout: 60_000 });
+
+    // The login form disappearing only means the form was submitted - the
+    // ServiceNow shell (and the session token it exposes to the page) can
+    // still be mid-load for a moment after that. Any snFetch/snMutate call
+    // made too early will pick up a stale/invalid token and fail with a 401,
+    // so make sure the page has actually settled before returning.
+    await page.waitForLoadState('networkidle').catch(() => { });
 }
 
 test('TC 001 Bitsight invalid token', async ({ page }) => {
@@ -1912,7 +1919,7 @@ test('TC 016 Bitsight Portfolio - Security Rating field is write-protected via A
     const record = records[0];
     const sysId = unwrapField(record.sys_id);
     const originalRating = unwrapField(record.x_bisit_vrm_security_rating);
-    console.log(`[TC 072] Target record: "${unwrapField(record.name)}" (sys_id: ${sysId}), current rating: ${originalRating}`);
+    console.log(`[TC 016] Target record: "${unwrapField(record.name)}" (sys_id: ${sysId}), current rating: ${originalRating}`);
 
     // ---------- Step 3: attempt to overwrite the field via the Table API while impersonated ----------
     const attemptedValue = String(Number(originalRating) > 0 ? Number(originalRating) - 1 : 999);
@@ -1921,8 +1928,8 @@ test('TC 016 Bitsight Portfolio - Security Rating field is write-protected via A
         page, updateUrl, 'PATCH', { x_bisit_vrm_security_rating: attemptedValue }
     );
 
-    console.log(`[TC 072] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
-    console.log(`[TC 072] PATCH response body: ${JSON.stringify(updateBody)}`);
+    console.log(`[TC 016] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 016] PATCH response body: ${JSON.stringify(updateBody)}`);
 
     // ---------- Step 4: re-fetch the record and confirm the value did NOT change ----------
     const { ok: recheckOk, body: recheckBody } = await snFetch(
@@ -1931,11 +1938,11 @@ test('TC 016 Bitsight Portfolio - Security Rating field is write-protected via A
     expect(recheckOk, 'Failed to re-fetch the record after the update attempt').toBeTruthy();
 
     const finalRating = unwrapField(recheckBody?.result?.x_bisit_vrm_security_rating);
-    console.log(`[TC 072] Rating after update attempt: ${finalRating} (was: ${originalRating}, attempted: ${attemptedValue})`);
+    console.log(`[TC 016] Rating after update attempt: ${finalRating} (was: ${originalRating}, attempted: ${attemptedValue})`);
 
     expect(finalRating, 'Expected the Bitsight security rating to remain unchanged - field should be write-protected by ACL').toBe(originalRating);
 
-    console.log('[TC 072] Test complete.');
+    console.log('[TC 016] Test complete.');
 });
 
 test('TC 017 Bitsight Rating and Risk Vector Alerts - Company field is write-protected via API for restricted user', async ({ page }) => {
@@ -1975,7 +1982,7 @@ test('TC 017 Bitsight Rating and Risk Vector Alerts - Company field is write-pro
     const record = records[0];
     const sysId = unwrapField(record.sys_id);
     const originalCompany = unwrapField(record.company);
-    console.log(`[TC 073] Target alert record sys_id: ${sysId}, current company: ${JSON.stringify(originalCompany)}`);
+    console.log(`[TC 017] Target alert record sys_id: ${sysId}, current company: ${JSON.stringify(originalCompany)}`);
 
     // ---------- Step 4: attempt to overwrite the Company field via the Table API while impersonated ----------
     const updateUrl = `/api/now/table/x_bisit_vrm_bitsight_alerts/${sysId}`;
@@ -1983,8 +1990,8 @@ test('TC 017 Bitsight Rating and Risk Vector Alerts - Company field is write-pro
         page, updateUrl, 'PATCH', { company: '' }
     );
 
-    console.log(`[TC 073] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
-    console.log(`[TC 073] PATCH response body: ${JSON.stringify(updateBody)}`);
+    console.log(`[TC 017] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 017] PATCH response body: ${JSON.stringify(updateBody)}`);
 
     // The API call itself succeeds (200) even though the ACL silently blocks
     // the actual field write - documenting this explicitly so it's clear this
@@ -1999,11 +2006,11 @@ test('TC 017 Bitsight Rating and Risk Vector Alerts - Company field is write-pro
     expect(recheckOk, 'Failed to re-fetch the alert record after the update attempt').toBeTruthy();
 
     const finalCompany = unwrapField(recheckBody?.result?.company);
-    console.log(`[TC 073] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
+    console.log(`[TC 017] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
 
     expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
 
-    console.log('[TC 073] Test complete.');
+    console.log('[TC 017] Test complete.');
 });
 
 test('TC 018 Bitsight Incidents - Company field is write-protected via API for restricted user', async ({ page }) => {
@@ -2041,7 +2048,7 @@ test('TC 018 Bitsight Incidents - Company field is write-protected via API for r
     const record = records[0];
     const sysId = unwrapField(record.sys_id);
     const originalCompany = unwrapField(record.company);
-    console.log(`[TC 074] Target incident: "${unwrapField(record.short_description)}" (sys_id: ${sysId}), current company: ${JSON.stringify(originalCompany)}`);
+    console.log(`[TC 018] Target incident: "${unwrapField(record.short_description)}" (sys_id: ${sysId}), current company: ${JSON.stringify(originalCompany)}`);
 
     // ---------- Step 4: attempt to overwrite the Company field via the Table API while impersonated ----------
     const updateUrl = `/api/now/table/incident/${sysId}`;
@@ -2049,8 +2056,8 @@ test('TC 018 Bitsight Incidents - Company field is write-protected via API for r
         page, updateUrl, 'PATCH', { company: '' }
     );
 
-    console.log(`[TC 074] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
-    console.log(`[TC 074] PATCH response body: ${JSON.stringify(updateBody)}`);
+    console.log(`[TC 018] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 018] PATCH response body: ${JSON.stringify(updateBody)}`);
 
     // The API call itself is expected to succeed (200) even though the ACL
     // silently blocks the actual field write - a soft no-op, not a hard
@@ -2065,11 +2072,11 @@ test('TC 018 Bitsight Incidents - Company field is write-protected via API for r
     expect(recheckOk, 'Failed to re-fetch the incident record after the update attempt').toBeTruthy();
 
     const finalCompany = unwrapField(recheckBody?.result?.company);
-    console.log(`[TC 074] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
+    console.log(`[TC 018] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
 
     expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
 
-    console.log('[TC 074] Test complete.');
+    console.log('[TC 018] Test complete.');
 });
 
 test('TC 019 Bitsight Dashboard - permission-denied message NOT shown for restricted user', async ({ page }) => {
@@ -2101,9 +2108,9 @@ test('TC 019 Bitsight Dashboard - permission-denied message NOT shown for restri
         'Expected the permission-denied message to NOT be visible for the restricted user'
     ).not.toBeVisible({ timeout: 30_000 });
 
-    console.log('[TC 075] Confirmed: permission-denied message is NOT shown for the restricted user on the Dashboard.');
+    console.log('[TC 019] Confirmed: permission-denied message is NOT shown for the restricted user on the Dashboard.');
 
-    console.log('[TC 075] Test complete.');
+    console.log('[TC 019] Test complete.');
 });
 
 test('TC 020 & 021 Bitsight - Application Configuration and Scheduled Data Imports hidden from restricted user', async ({ page }) => {
@@ -2135,7 +2142,7 @@ test('TC 020 & 021 Bitsight - Application Configuration and Scheduled Data Impor
     await expect(applicationConfigLink, 'Expected "Application Configuration" to not be visible to a restricted user').not.toBeVisible();
     await expect(scheduledImportsLink, 'Expected "Scheduled Data Imports" to not be visible to a restricted user').not.toBeVisible();
 
-    console.log('[TC 076 & 077] Confirmed: Application Configuration and Scheduled Data Imports are hidden from the restricted user.');
+    console.log('[TC 020 & 021] Confirmed: Application Configuration and Scheduled Data Imports are hidden from the restricted user.');
 
-    console.log('[TC 076 & 077] Test complete.');
+    console.log('[TC 020 & 021] Test complete.');
 });
