@@ -180,8 +180,7 @@ test('TC 003 Bitsight import data validation', async ({ page }) => {
     // await frame.locator('[id="sys_display.caller"]').click();
     // await frame.locator('[id="sys_display.caller"]').fill('Abel Tuter');
     // await frame.locator('#property_save_btn').click();
-
-    // await page.waitForTimeout(3000);
+    await page.waitForTimeout(3000);
     await frame.locator('#ins_company_y').click();
     await frame.locator('[id="sys_display.caller"]').click();
     await frame.locator('[id="sys_display.caller"]').fill('Abel Tuter');
