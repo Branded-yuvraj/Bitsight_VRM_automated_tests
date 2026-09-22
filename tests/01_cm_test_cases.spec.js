@@ -43,6 +43,35 @@ const { ServiceNowApiClient } = require('./utils/servicenow-api-client'); // adj
 
 
 
+
+/**
+ * Logs out of the current session and logs in with the specified credentials.
+ * Mirrors the login/logout pattern used for the restricted-user test cases
+ * (rather than admin impersonation), so the restricted user is a real,
+ * independently-authenticated session fetched from the environment.
+ */
+async function switchUser(page, username, password) {
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+
+    const userMenuButton = page.getByRole('button', { name: new RegExp(`${process.env.SN_USER || 'bitsight_admin'}.*Available`, 'i') }).or(page.getByRole('button', { name: /Available|User menu/i })).first();
+    await userMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
+    await userMenuButton.click();
+
+    const logoutButton = page.getByRole('button', { name: 'Log out' }).or(page.getByRole('menuitem', { name: 'Log out' })).first();
+    await logoutButton.waitFor({ state: 'visible', timeout: 10_000 });
+    await logoutButton.click();
+
+    const usernameField = page.getByRole('textbox', { name: 'User name' });
+    await usernameField.waitFor({ state: 'visible', timeout: 60_000 });
+    await usernameField.fill(username);
+
+    const passwordField = page.getByRole('textbox', { name: 'Password' });
+    await passwordField.fill(password);
+
+    await page.getByRole('button', { name: 'Log in' }).click();
+    await usernameField.waitFor({ state: 'hidden', timeout: 60_000 });
+}
+
 test('TC 001 Bitsight invalid token', async ({ page }) => {
     test.setTimeout(300_000);
 
@@ -1865,72 +1894,46 @@ test('TC 016 Bitsight Portfolio - Security Rating field is write-protected via A
         `Expected ServiceNow alerts table count (${snAlertsCount}) to match Bitsight Alerts ground truth count (${totalAlertsCount})`
     ).toBe(totalAlertsCount);
 
-    // ---------- Step 1: impersonate the restricted user ----------
-    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
-    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
-    await adminMenuButton.click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
 
-    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
-    await userCombo.click();
-    await userCombo.fill(process.env.VRM_USER_BASIC);
-    await page.locator('[id$="-item-container"]').filter({ hasText: process.env.VRM_USER_BASIC }).click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    // ---------- Step 1: authenticate as the restricted user ----------
+    await switchUser(page, regularUser, regularPass);
 
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).waitFor({ state: 'visible', timeout: 30_000 });
+    // ---------- Step 2: fetch a core_company record that has a Bitsight security rating ----------
+    const listUrl = `/api/now/table/core_company?sysparm_query=x_bisit_vrm_security_ratingISNOTEMPTY` +
+        `&sysparm_fields=sys_id,name,x_bisit_vrm_security_rating&sysparm_limit=1`;
+    const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
+    expect(listOk, `Failed to fetch a core_company record (HTTP ${listStatus})`).toBeTruthy();
 
-    try {
-        // ---------- Step 2: fetch a core_company record that has a Bitsight security rating ----------
-        const listUrl = `/api/now/table/core_company?sysparm_query=x_bisit_vrm_security_ratingISNOTEMPTY` +
-            `&sysparm_fields=sys_id,name,x_bisit_vrm_security_rating&sysparm_limit=1`;
-        const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
-        expect(listOk, `Failed to fetch a core_company record (HTTP ${listStatus})`).toBeTruthy();
+    const records = listBody?.result || [];
+    expect(records.length, 'Expected at least one core_company record with a Bitsight security rating').toBeGreaterThan(0);
 
-        const records = listBody?.result || [];
-        expect(records.length, 'Expected at least one core_company record with a Bitsight security rating').toBeGreaterThan(0);
+    const record = records[0];
+    const sysId = unwrapField(record.sys_id);
+    const originalRating = unwrapField(record.x_bisit_vrm_security_rating);
+    console.log(`[TC 072] Target record: "${unwrapField(record.name)}" (sys_id: ${sysId}), current rating: ${originalRating}`);
 
-        const record = records[0];
-        const sysId = unwrapField(record.sys_id);
-        const originalRating = unwrapField(record.x_bisit_vrm_security_rating);
-        console.log(`[TC 072] Target record: "${unwrapField(record.name)}" (sys_id: ${sysId}), current rating: ${originalRating}`);
+    // ---------- Step 3: attempt to overwrite the field via the Table API while impersonated ----------
+    const attemptedValue = String(Number(originalRating) > 0 ? Number(originalRating) - 1 : 999);
+    const updateUrl = `/api/now/table/core_company/${sysId}`;
+    const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
+        page, updateUrl, 'PATCH', { x_bisit_vrm_security_rating: attemptedValue }
+    );
 
-        // ---------- Step 3: attempt to overwrite the field via the Table API while impersonated ----------
-        const attemptedValue = String(Number(originalRating) > 0 ? Number(originalRating) - 1 : 999);
-        const updateUrl = `/api/now/table/core_company/${sysId}`;
-        const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
-            page, updateUrl, 'PATCH', { x_bisit_vrm_security_rating: attemptedValue }
-        );
+    console.log(`[TC 072] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 072] PATCH response body: ${JSON.stringify(updateBody)}`);
 
-        console.log(`[TC 072] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
-        console.log(`[TC 072] PATCH response body: ${JSON.stringify(updateBody)}`);
+    // ---------- Step 4: re-fetch the record and confirm the value did NOT change ----------
+    const { ok: recheckOk, body: recheckBody } = await snFetch(
+        page, `/api/now/table/core_company/${sysId}?sysparm_fields=x_bisit_vrm_security_rating`
+    );
+    expect(recheckOk, 'Failed to re-fetch the record after the update attempt').toBeTruthy();
 
-        // ---------- Step 4: re-fetch the record and confirm the value did NOT change ----------
-        const { ok: recheckOk, body: recheckBody } = await snFetch(
-            page, `/api/now/table/core_company/${sysId}?sysparm_fields=x_bisit_vrm_security_rating`
-        );
-        expect(recheckOk, 'Failed to re-fetch the record after the update attempt').toBeTruthy();
+    const finalRating = unwrapField(recheckBody?.result?.x_bisit_vrm_security_rating);
+    console.log(`[TC 072] Rating after update attempt: ${finalRating} (was: ${originalRating}, attempted: ${attemptedValue})`);
 
-        const finalRating = unwrapField(recheckBody?.result?.x_bisit_vrm_security_rating);
-        console.log(`[TC 072] Rating after update attempt: ${finalRating} (was: ${originalRating}, attempted: ${attemptedValue})`);
-
-        expect(finalRating, 'Expected the Bitsight security rating to remain unchanged - field should be write-protected by ACL').toBe(originalRating);
-    } finally {
-        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
-
-        // Ending impersonation reloads the page just like starting it does -
-        // wait for that reload to fully settle and confirm we're back to admin
-        // before this test finishes, so the NEXT test doesn't inherit a
-        // half-reverted impersonated session.
-        await page.waitForLoadState('networkidle').catch(() => { });
-        await page.getByRole('button', { name: 'System Administrator:' })
-            .waitFor({ state: 'visible', timeout: 30_000 })
-            .catch(() => { });
-
-        console.log('[TC 072] Impersonation ended.');
-    }
+    expect(finalRating, 'Expected the Bitsight security rating to remain unchanged - field should be write-protected by ACL').toBe(originalRating);
 
     console.log('[TC 072] Test complete.');
 });
@@ -1938,96 +1941,67 @@ test('TC 016 Bitsight Portfolio - Security Rating field is write-protected via A
 test('TC 017 Bitsight Rating and Risk Vector Alerts - Company field is write-protected via API for restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
-    await page.goto(BASE_URL);
-    await page.waitForLoadState('networkidle').catch(() => { });
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
 
-    // ---------- Step 1: impersonate the restricted user ----------
-    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
-    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
-    await adminMenuButton.click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    // ---------- Step 1: authenticate as the restricted user ----------
+    await switchUser(page, regularUser, regularPass);
 
-    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
-    await userCombo.click();
-    await userCombo.fill(process.env.VRM_USER_BASIC);
-    await page.locator('[id$="-item-container"]').filter({ hasText: process.env.VRM_USER_BASIC }).click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
 
-    // Impersonation triggers a full page reload under the hood - wait for the
-    // banner to confirm it's actually settled before touching the page again.
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).waitFor({ state: 'visible', timeout: 30_000 });
+    // ---------- Step 2: navigate to the Rating and Risk Vector Alerts list ----------
+    await page.getByText('All').first().click();
 
-    try {
-        // ---------- Step 2: navigate to the Rating and Risk Vector Alerts list ----------
-        await page.getByText('All').first().click();
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+    await page
+        .getByLabel('Rating and Risk Vector AlertsAlerts Received From Bitsight')
+        .getByLabel('Rating and Risk Vector Alerts 2 of')
+        .click();
 
-        const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
-        await searchBox.click();
-        await searchBox.fill('bitsight');
-        await page
-            .getByLabel('Rating and Risk Vector AlertsAlerts Received From Bitsight')
-            .getByLabel('Rating and Risk Vector Alerts 2 of')
-            .click();
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+    const companyColumnHeader = frame.getByRole('columnheader', { name: 'Company' });
+    await companyColumnHeader.waitFor({ state: 'visible', timeout: 30_000 });
 
-        const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
-        const companyColumnHeader = frame.getByRole('columnheader', { name: 'Company' });
-        await companyColumnHeader.waitFor({ state: 'visible', timeout: 30_000 });
+    // ---------- Step 3: fetch an alert record via the Table API ----------
+    const listUrl = `/api/now/table/x_bisit_vrm_bitsight_alerts?sysparm_fields=sys_id,company&sysparm_limit=1`;
+    const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
+    expect(listOk, `Failed to fetch a Bitsight alert record (HTTP ${listStatus})`).toBeTruthy();
 
-        // ---------- Step 3: fetch an alert record via the Table API ----------
-        const listUrl = `/api/now/table/x_bisit_vrm_bitsight_alerts?sysparm_fields=sys_id,company&sysparm_limit=1`;
-        const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
-        expect(listOk, `Failed to fetch a Bitsight alert record (HTTP ${listStatus})`).toBeTruthy();
+    const records = listBody?.result || [];
+    expect(records.length, 'Expected at least one record in the Bitsight alerts table').toBeGreaterThan(0);
 
-        const records = listBody?.result || [];
-        expect(records.length, 'Expected at least one record in the Bitsight alerts table').toBeGreaterThan(0);
+    const record = records[0];
+    const sysId = unwrapField(record.sys_id);
+    const originalCompany = unwrapField(record.company);
+    console.log(`[TC 073] Target alert record sys_id: ${sysId}, current company: ${JSON.stringify(originalCompany)}`);
 
-        const record = records[0];
-        const sysId = unwrapField(record.sys_id);
-        const originalCompany = unwrapField(record.company);
-        console.log(`[TC 073] Target alert record sys_id: ${sysId}, current company: ${JSON.stringify(originalCompany)}`);
+    // ---------- Step 4: attempt to overwrite the Company field via the Table API while impersonated ----------
+    const updateUrl = `/api/now/table/x_bisit_vrm_bitsight_alerts/${sysId}`;
+    const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
+        page, updateUrl, 'PATCH', { company: '' }
+    );
 
-        // ---------- Step 4: attempt to overwrite the Company field via the Table API while impersonated ----------
-        const updateUrl = `/api/now/table/x_bisit_vrm_bitsight_alerts/${sysId}`;
-        const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
-            page, updateUrl, 'PATCH', { company: '' }
-        );
+    console.log(`[TC 073] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 073] PATCH response body: ${JSON.stringify(updateBody)}`);
 
-        console.log(`[TC 073] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
-        console.log(`[TC 073] PATCH response body: ${JSON.stringify(updateBody)}`);
+    // The API call itself succeeds (200) even though the ACL silently blocks
+    // the actual field write - documenting this explicitly so it's clear this
+    // is a "soft" no-op denial, not a hard 403 rejection.
+    expect(updateStatus, 'Expected the Table API PATCH request itself to succeed (200) - the ACL denial is a silent no-op, not a request-level rejection').toBe(200);
+    expect(updateOk, 'Expected the Table API PATCH response to report ok').toBeTruthy();
 
-        // The API call itself succeeds (200) even though the ACL silently blocks
-        // the actual field write - documenting this explicitly so it's clear this
-        // is a "soft" no-op denial, not a hard 403 rejection.
-        expect(updateStatus, 'Expected the Table API PATCH request itself to succeed (200) - the ACL denial is a silent no-op, not a request-level rejection').toBe(200);
-        expect(updateOk, 'Expected the Table API PATCH response to report ok').toBeTruthy();
+    // ---------- Step 5: re-fetch the record and confirm the Company value did NOT change ----------
+    const { ok: recheckOk, body: recheckBody } = await snFetch(
+        page, `/api/now/table/x_bisit_vrm_bitsight_alerts/${sysId}?sysparm_fields=company`
+    );
+    expect(recheckOk, 'Failed to re-fetch the alert record after the update attempt').toBeTruthy();
 
-        // ---------- Step 5: re-fetch the record and confirm the Company value did NOT change ----------
-        const { ok: recheckOk, body: recheckBody } = await snFetch(
-            page, `/api/now/table/x_bisit_vrm_bitsight_alerts/${sysId}?sysparm_fields=company`
-        );
-        expect(recheckOk, 'Failed to re-fetch the alert record after the update attempt').toBeTruthy();
+    const finalCompany = unwrapField(recheckBody?.result?.company);
+    console.log(`[TC 073] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
 
-        const finalCompany = unwrapField(recheckBody?.result?.company);
-        console.log(`[TC 073] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
-
-        expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
-    } finally {
-        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
-
-        // Ending impersonation reloads the page just like starting it does -
-        // wait for that reload to fully settle and confirm we're back to admin
-        // before this test finishes, so the NEXT test doesn't inherit a
-        // half-reverted impersonated session.
-        await page.waitForLoadState('networkidle').catch(() => { });
-        await page.getByRole('button', { name: 'System Administrator:' })
-            .waitFor({ state: 'visible', timeout: 30_000 })
-            .catch(() => { });
-
-        console.log('[TC 073] Impersonation ended.');
-    }
+    expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
 
     console.log('[TC 073] Test complete.');
 });
@@ -2035,94 +2009,65 @@ test('TC 017 Bitsight Rating and Risk Vector Alerts - Company field is write-pro
 test('TC 018 Bitsight Incidents - Company field is write-protected via API for restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
-    await page.goto(BASE_URL);
-    await page.waitForLoadState('networkidle').catch(() => { });
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
 
-    // ---------- Step 1: impersonate the restricted user ----------
-    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
-    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
-    await adminMenuButton.click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    // ---------- Step 1: authenticate as the restricted user ----------
+    await switchUser(page, regularUser, regularPass);
 
-    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
-    await userCombo.click();
-    await userCombo.fill(process.env.VRM_USER_BASIC);
-    await page.locator('[id$="-item-container"]').filter({ hasText: process.env.VRM_USER_BASIC }).click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
 
-    // Impersonation triggers a full page reload under the hood - wait for the
-    // banner to confirm it's actually settled before touching the page again.
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).waitFor({ state: 'visible', timeout: 30_000 });
+    // ---------- Step 2: navigate to the Incidents list ----------
+    await page.getByText('All').first().click();
 
-    try {
-        // ---------- Step 2: navigate to the Incidents list ----------
-        await page.getByText('All').first().click();
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
+    await page.getByRole('link', { name: 'Incidents 3 of' }).click();
 
-        const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
-        await searchBox.click();
-        await searchBox.fill('bitsight');
-        await page.getByRole('link', { name: 'Incidents 3 of' }).click();
+    const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
+    const companyColumnHeader = frame.getByRole('columnheader', { name: 'Company' });
+    await companyColumnHeader.waitFor({ state: 'visible', timeout: 30_000 });
 
-        const frame = page.locator('iframe[name="gsft_main"]').contentFrame();
-        const companyColumnHeader = frame.getByRole('columnheader', { name: 'Company' });
-        await companyColumnHeader.waitFor({ state: 'visible', timeout: 30_000 });
+    // ---------- Step 3: fetch a Bitsight-related incident via the Table API ----------
+    const listUrl = `/api/now/table/incident?sysparm_query=short_descriptionLIKEbitsight` +
+        `&sysparm_fields=sys_id,company,short_description&sysparm_limit=1`;
+    const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
+    expect(listOk, `Failed to fetch a Bitsight-related incident (HTTP ${listStatus})`).toBeTruthy();
 
-        // ---------- Step 3: fetch a Bitsight-related incident via the Table API ----------
-        const listUrl = `/api/now/table/incident?sysparm_query=short_descriptionLIKEbitsight` +
-            `&sysparm_fields=sys_id,company,short_description&sysparm_limit=1`;
-        const { ok: listOk, status: listStatus, body: listBody } = await snFetch(page, listUrl);
-        expect(listOk, `Failed to fetch a Bitsight-related incident (HTTP ${listStatus})`).toBeTruthy();
+    const records = listBody?.result || [];
+    expect(records.length, 'Expected at least one incident with "bitsight" in the short description').toBeGreaterThan(0);
 
-        const records = listBody?.result || [];
-        expect(records.length, 'Expected at least one incident with "bitsight" in the short description').toBeGreaterThan(0);
+    const record = records[0];
+    const sysId = unwrapField(record.sys_id);
+    const originalCompany = unwrapField(record.company);
+    console.log(`[TC 074] Target incident: "${unwrapField(record.short_description)}" (sys_id: ${sysId}), current company: ${JSON.stringify(originalCompany)}`);
 
-        const record = records[0];
-        const sysId = unwrapField(record.sys_id);
-        const originalCompany = unwrapField(record.company);
-        console.log(`[TC 074] Target incident: "${unwrapField(record.short_description)}" (sys_id: ${sysId}), current company: ${JSON.stringify(originalCompany)}`);
+    // ---------- Step 4: attempt to overwrite the Company field via the Table API while impersonated ----------
+    const updateUrl = `/api/now/table/incident/${sysId}`;
+    const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
+        page, updateUrl, 'PATCH', { company: '' }
+    );
 
-        // ---------- Step 4: attempt to overwrite the Company field via the Table API while impersonated ----------
-        const updateUrl = `/api/now/table/incident/${sysId}`;
-        const { ok: updateOk, status: updateStatus, body: updateBody } = await snMutate(
-            page, updateUrl, 'PATCH', { company: '' }
-        );
+    console.log(`[TC 074] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
+    console.log(`[TC 074] PATCH response body: ${JSON.stringify(updateBody)}`);
 
-        console.log(`[TC 074] PATCH response - status: ${updateStatus}, ok: ${updateOk}`);
-        console.log(`[TC 074] PATCH response body: ${JSON.stringify(updateBody)}`);
+    // The API call itself is expected to succeed (200) even though the ACL
+    // silently blocks the actual field write - a soft no-op, not a hard
+    // 403 rejection (consistent with the Alerts table behavior in TC-073).
+    expect(updateStatus, 'Expected the Table API PATCH request itself to succeed (200) - the ACL denial is a silent no-op, not a request-level rejection').toBe(200);
+    expect(updateOk, 'Expected the Table API PATCH response to report ok').toBeTruthy();
 
-        // The API call itself is expected to succeed (200) even though the ACL
-        // silently blocks the actual field write - a soft no-op, not a hard
-        // 403 rejection (consistent with the Alerts table behavior in TC-073).
-        expect(updateStatus, 'Expected the Table API PATCH request itself to succeed (200) - the ACL denial is a silent no-op, not a request-level rejection').toBe(200);
-        expect(updateOk, 'Expected the Table API PATCH response to report ok').toBeTruthy();
+    // ---------- Step 5: re-fetch the record and confirm the Company value did NOT change ----------
+    const { ok: recheckOk, body: recheckBody } = await snFetch(
+        page, `/api/now/table/incident/${sysId}?sysparm_fields=company`
+    );
+    expect(recheckOk, 'Failed to re-fetch the incident record after the update attempt').toBeTruthy();
 
-        // ---------- Step 5: re-fetch the record and confirm the Company value did NOT change ----------
-        const { ok: recheckOk, body: recheckBody } = await snFetch(
-            page, `/api/now/table/incident/${sysId}?sysparm_fields=company`
-        );
-        expect(recheckOk, 'Failed to re-fetch the incident record after the update attempt').toBeTruthy();
+    const finalCompany = unwrapField(recheckBody?.result?.company);
+    console.log(`[TC 074] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
 
-        const finalCompany = unwrapField(recheckBody?.result?.company);
-        console.log(`[TC 074] Company after update attempt: ${JSON.stringify(finalCompany)} (was: ${JSON.stringify(originalCompany)})`);
-
-        expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
-    } finally {
-        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
-
-        // Ending impersonation reloads the page just like starting it does -
-        // wait for that reload to fully settle and confirm we're back to admin
-        // before this test finishes, so the NEXT test doesn't inherit a
-        // half-reverted impersonated session.
-        await page.waitForLoadState('networkidle').catch(() => { });
-        await page.getByRole('button', { name: 'System Administrator:' })
-            .waitFor({ state: 'visible', timeout: 30_000 })
-            .catch(() => { });
-
-        console.log('[TC 074] Impersonation ended.');
-    }
+    expect(finalCompany, 'Expected the Company field to remain unchanged - field should be write-protected by ACL').toEqual(originalCompany);
 
     console.log('[TC 074] Test complete.');
 });
@@ -2130,62 +2075,33 @@ test('TC 018 Bitsight Incidents - Company field is write-protected via API for r
 test('TC 019 Bitsight Dashboard - permission-denied message NOT shown for restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
-    await page.goto(BASE_URL);
-    await page.waitForLoadState('networkidle').catch(() => { });
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
 
-    // ---------- Step 1: impersonate the restricted user ----------
-    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
-    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
-    await adminMenuButton.click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    // ---------- Step 1: authenticate as the restricted user ----------
+    await switchUser(page, regularUser, regularPass);
 
-    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
-    await userCombo.click();
-    await userCombo.fill(process.env.VRM_USER_BASIC);
-    await page.locator('[id$="-item-container"]').filter({ hasText: process.env.VRM_USER_BASIC }).click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
 
-    // Impersonation triggers a full page reload under the hood - wait for the
-    // banner to confirm it's actually settled before touching the page again.
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).waitFor({ state: 'visible', timeout: 30_000 });
+    // ---------- Step 2: navigate to the Dashboard via search ----------
+    await page.getByText('All').first().click();
 
-    try {
-        // ---------- Step 2: navigate to the Dashboard via search ----------
-        await page.getByText('All').first().click();
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
 
-        const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
-        await searchBox.click();
-        await searchBox.fill('bitsight');
+    await page
+        .getByRole('link', { name: 'Dashboard 4 of' })
+        .click();
 
-        await page
-            .getByRole('link', { name: 'Dashboard 4 of' })
-            .click();
+    // ---------- Step 3: confirm the permission-denied message is NOT shown ----------
+    const permissionDeniedMessage = page.getByRole('heading', { name: 'You do not have permission to' });
+    await expect(
+        permissionDeniedMessage,
+        'Expected the permission-denied message to NOT be visible for the restricted user'
+    ).not.toBeVisible({ timeout: 30_000 });
 
-        // ---------- Step 3: confirm the permission-denied message is NOT shown ----------
-        const permissionDeniedMessage = page.getByRole('heading', { name: 'You do not have permission to' });
-        await expect(
-            permissionDeniedMessage,
-            'Expected the permission-denied message to NOT be visible for the restricted user'
-        ).not.toBeVisible({ timeout: 30_000 });
-
-        console.log('[TC 075] Confirmed: permission-denied message is NOT shown for the restricted user on the Dashboard.');
-    } finally {
-        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
-
-        // Ending impersonation reloads the page just like starting it does -
-        // wait for that reload to fully settle and confirm we're back to admin
-        // before this test finishes, so the NEXT test doesn't inherit a
-        // half-reverted impersonated session.
-        await page.waitForLoadState('networkidle').catch(() => { });
-        await page.getByRole('button', { name: 'System Administrator:' })
-            .waitFor({ state: 'visible', timeout: 30_000 })
-            .catch(() => { });
-
-        console.log('[TC 075] Impersonation ended.');
-    }
+    console.log('[TC 075] Confirmed: permission-denied message is NOT shown for the restricted user on the Dashboard.');
 
     console.log('[TC 075] Test complete.');
 });
@@ -2193,62 +2109,33 @@ test('TC 019 Bitsight Dashboard - permission-denied message NOT shown for restri
 test('TC 020 & 021 Bitsight - Application Configuration and Scheduled Data Imports hidden from restricted user', async ({ page }) => {
     test.setTimeout(120_000);
 
-    await page.goto(BASE_URL);
-    await page.waitForLoadState('networkidle').catch(() => { });
+    const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
+    const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
 
-    // ---------- Step 1: impersonate the restricted user ----------
-    const adminMenuButton = page.getByRole('button', { name: 'System Administrator:' });
-    await adminMenuButton.waitFor({ state: 'visible', timeout: 30_000 });
-    await adminMenuButton.click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    // ---------- Step 1: authenticate as the restricted user ----------
+    await switchUser(page, regularUser, regularPass);
 
-    const userCombo = page.getByRole('combobox', { name: 'Select a user' });
-    await userCombo.click();
-    await userCombo.fill(process.env.VRM_USER_BASIC);
-    await page.locator('[id$="-item-container"]').filter({ hasText: process.env.VRM_USER_BASIC }).click();
-    await page.getByRole('button', { name: 'Impersonate user' }).click();
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
 
-    // Impersonation triggers a full page reload under the hood - wait for the
-    // banner to confirm it's actually settled before touching the page again.
-    await page.waitForLoadState('networkidle').catch(() => { });
-    await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).waitFor({ state: 'visible', timeout: 30_000 });
+    // ---------- Step 2: search for "bitsight" ----------
+    await page.getByText('All').first().click();
 
-    try {
-        // ---------- Step 2: search for "bitsight" ----------
-        await page.getByText('All').first().click();
+    const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await searchBox.click();
+    await searchBox.fill('bitsight');
 
-        const searchBox = page.getByRole('textbox', { name: 'Enter search term to filter' });
-        await searchBox.click();
-        await searchBox.fill('bitsight');
+    const bitsightListItem = page
+        .getByRole('listitem')
+        .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' });
 
-        const bitsightListItem = page
-            .getByRole('listitem')
-            .filter({ hasText: 'Bitsight Vendor Risk ManagementEdit ApplicationPortfolioEdit Module Rating and' });
+    // ---------- Step 3: confirm the admin-only entries are not visible ----------
+    const applicationConfigLink = bitsightListItem.getByLabel('Application Configuration 4 of');
+    const scheduledImportsLink = bitsightListItem.getByLabel('Scheduled Data Imports 5 of');
 
-        // ---------- Step 3: confirm the admin-only entries are not visible ----------
-        const applicationConfigLink = bitsightListItem.getByLabel('Application Configuration 4 of');
-        const scheduledImportsLink = bitsightListItem.getByLabel('Scheduled Data Imports 5 of');
+    await expect(applicationConfigLink, 'Expected "Application Configuration" to not be visible to a restricted user').not.toBeVisible();
+    await expect(scheduledImportsLink, 'Expected "Scheduled Data Imports" to not be visible to a restricted user').not.toBeVisible();
 
-        await expect(applicationConfigLink, 'Expected "Application Configuration" to not be visible to a restricted user').not.toBeVisible();
-        await expect(scheduledImportsLink, 'Expected "Scheduled Data Imports" to not be visible to a restricted user').not.toBeVisible();
-
-        console.log('[TC 076 & 077] Confirmed: Application Configuration and Scheduled Data Imports are hidden from the restricted user.');
-    } finally {
-        // ---------- Step 5: end impersonation (always runs, even if an assertion above failed) ----------
-        await page.getByRole('button', { name: `${process.env.VRM_USER_BASIC}: Available` }).click().catch(() => { });
-        await page.getByRole('button', { name: 'End impersonation' }).click().catch(() => { });
-
-        // Ending impersonation reloads the page just like starting it does -
-        // wait for that reload to fully settle and confirm we're back to admin
-        // before this test finishes, so the NEXT test doesn't inherit a
-        // half-reverted impersonated session.
-        await page.waitForLoadState('networkidle').catch(() => { });
-        await page.getByRole('button', { name: 'System Administrator:' })
-            .waitFor({ state: 'visible', timeout: 30_000 })
-            .catch(() => { });
-
-        console.log('[TC 076 & 077] Impersonation ended.');
-    }
+    console.log('[TC 076 & 077] Confirmed: Application Configuration and Scheduled Data Imports are hidden from the restricted user.');
 
     console.log('[TC 076 & 077] Test complete.');
 });
