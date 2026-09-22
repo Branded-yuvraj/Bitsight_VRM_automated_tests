@@ -1632,6 +1632,7 @@ test('TC 012 Unmatched company is not inserted when Insert option is disabled', 
     await frame.locator('#ins_company_n').click();
     await frame.locator('[id="sys_display.caller"]').click();
     await frame.locator('[id="sys_display.caller"]').fill('Abel Tuter');
+    await frame.locator('[id="sys_display.caller"]').press('Enter');
     await frame.locator('#property_save_btn').click();
     await page.waitForTimeout(3000);
 
@@ -1676,6 +1677,7 @@ test('TC 013 Unmatched company is inserted when Insert option is enabled', async
     await frame.locator('#ins_company_y').click();
     await frame.locator('[id="sys_display.caller"]').click();
     await frame.locator('[id="sys_display.caller"]').fill('Abel Tuter');
+    await frame.locator('[id="sys_display.caller"]').press('Enter');
     await page.waitForTimeout(3000);
     await frame.locator('#property_save_btn').click();
     await page.waitForTimeout(3000);
@@ -1723,6 +1725,7 @@ test('TC 014 Imported companies are not marked as vendors when Mark as Vendor is
     await frame.locator('#mark_comp_n').click();
     await frame.locator('[id="sys_display.caller"]').click();
     await frame.locator('[id="sys_display.caller"]').fill('Abel Tuter');
+    await frame.locator('[id="sys_display.caller"]').press('Enter');
     await frame.locator('#property_save_btn').click();
     await page.waitForTimeout(3000);
 
@@ -1773,6 +1776,7 @@ test('TC 015 Imported companies are marked as vendors when Mark as Vendor is ena
     await frame.locator('#mark_comp_y').click();
     await frame.locator('[id="sys_display.caller"]').click();
     await frame.locator('[id="sys_display.caller"]').fill('Abel Tuter');
+    await frame.locator('[id="sys_display.caller"]').press('Enter');
     await frame.locator('#property_save_btn').click();
     await page.waitForTimeout(3000);
 
