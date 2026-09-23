@@ -750,51 +750,51 @@ test('TC 009 Bitsight Portfolio - Security Rating field is write-protected via A
     await page.goto(BASE_URL);
 
     // // ---------- Step 0: run alerts import reconciliation first ----------
-    // console.log('\n=== Step 0: Cleaning Up Existing Alerts & Incidents ===');
-    // await clearAlerts(serviceNowClient);
-    // await clearIncidents(serviceNowClient);
+    console.log('\n=== Step 0: Cleaning Up Existing Alerts & Incidents ===');
+    await clearAlerts(serviceNowClient);
+    await clearIncidents(serviceNowClient);
 
-    // console.log('\n=== Step 0: Configuring Application Properties ===');
-    // await configureApplicationProperties(page, {
-    //     ins_company: true,
-    //     mark_comp: true,
-    //     maxpropertyinc: 10,
-    //     inc_score: true,
-    //     incscoredrop: 5,
-    //     critcal_alert_inc: true,
-    //     inc_warn_alert: true,
-    //     assign_incident: 'user',
-    //     user: 'abel tuter',
-    //     caller: 'abraham lincoln',
-    // });
+    console.log('\n=== Step 0: Configuring Application Properties ===');
+    await configureApplicationProperties(page, {
+        ins_company: true,
+        mark_comp: true,
+        maxpropertyinc: 10,
+        inc_score: true,
+        incscoredrop: 5,
+        critcal_alert_inc: true,
+        inc_warn_alert: true,
+        assign_incident: 'user',
+        user: 'abel tuter',
+        caller: 'abraham lincoln',
+    });
 
-    // await triggerAndWaitForAlertsImport(page, serviceNowClient);
+    await triggerAndWaitForAlertsImport(page, serviceNowClient);
 
-    // const snCompanyGuids = await serviceNowClient.getBitsightVendorGuids();
-    // console.log(`Found ${snCompanyGuids.length} active Bitsight companies in ServiceNow core_company.`);
-    // const alertsGroundTruth = await bitsightClient.getAlertsCount({
-    //     portfolioGuids: snCompanyGuids.map(c => c.guid),
-    // });
-    // const totalAlertsCount = typeof alertsGroundTruth === 'number' ? alertsGroundTruth : (alertsGroundTruth.count ?? alertsGroundTruth);
-    // console.log(`Bitsight Alerts Ground Truth Count (matching ServiceNow portfolio): ${totalAlertsCount}`);
+    const snCompanyGuids = await serviceNowClient.getBitsightVendorGuids();
+    console.log(`Found ${snCompanyGuids.length} active Bitsight companies in ServiceNow core_company.`);
+    const alertsGroundTruth = await bitsightClient.getAlertsCount({
+        portfolioGuids: snCompanyGuids.map(c => c.guid),
+    });
+    const totalAlertsCount = typeof alertsGroundTruth === 'number' ? alertsGroundTruth : (alertsGroundTruth.count ?? alertsGroundTruth);
+    console.log(`Bitsight Alerts Ground Truth Count (matching ServiceNow portfolio): ${totalAlertsCount}`);
 
-    // const snAlertsList = await serviceNowClient.getTableRecords('x_bisit_vrm_bitsight_alerts', {
-    //     sysparm_limit: 10000,
-    //     fields: 'sys_id',
-    // });
-    // const snAlertsCount = snAlertsList.length;
-    // console.log(`ServiceNow alerts table record count: ${snAlertsCount}`);
+    const snAlertsList = await serviceNowClient.getTableRecords('x_bisit_vrm_bitsight_alerts', {
+        sysparm_limit: 10000,
+        fields: 'sys_id',
+    });
+    const snAlertsCount = snAlertsList.length;
+    console.log(`ServiceNow alerts table record count: ${snAlertsCount}`);
 
-    // console.table({
-    //     'Bitsight Alerts Ground Truth Count': totalAlertsCount,
-    //     'Actual ServiceNow Alerts Table Count': snAlertsCount,
-    //     'Difference': Math.abs(snAlertsCount - totalAlertsCount),
-    // });
+    console.table({
+        'Bitsight Alerts Ground Truth Count': totalAlertsCount,
+        'Actual ServiceNow Alerts Table Count': snAlertsCount,
+        'Difference': Math.abs(snAlertsCount - totalAlertsCount),
+    });
 
-    // expect(
-    //     snAlertsCount,
-    //     `Expected ServiceNow alerts table count (${snAlertsCount}) to match Bitsight Alerts ground truth count (${totalAlertsCount})`
-    // ).toBe(totalAlertsCount);
+    expect(
+        snAlertsCount,
+        `Expected ServiceNow alerts table count (${snAlertsCount}) to match Bitsight Alerts ground truth count (${totalAlertsCount})`
+    ).toBe(totalAlertsCount);
 
     const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
     const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
