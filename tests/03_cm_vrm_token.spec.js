@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { BitsightApiClient } from './utils/bitsight-api-client.js';
 import { ServiceNowApiClient, toSnDateTime } from './utils/servicenow-api-client.js';
-import { clearPortfolio } from './utils/cleanup-utils.js';
+import { clearPortfolio, clearAlerts, clearIncidents } from './utils/cleanup-utils.js';
 import { snFetch, snMutate } from './utils/servicenow-session-helpers.js';
 
 const BASE_URL = process.env.SN_URL;
@@ -61,23 +61,68 @@ async function switchUser(page, username, password) {
     await page.getByRole('button', { name: 'Log in' }).click();
     await usernameField.waitFor({ state: 'hidden', timeout: 60_000 });
 }
+/**
+ * Reusable helper to capture baseline syslog timestamp, trigger Scheduled Alerts Import,
+ * and wait for completion in syslog.
+ */
+async function triggerAndWaitForAlertsImport(page, serviceNowClient, options = {}) {
+    const IMPORT_JOB_NAME = options.jobName || 'Bitsight Alerts Import';
+    const COMPLETION_LOG_MESSAGE = options.completionLogMessage || 'Bitsight Alerts Import Complete.';
+
+    // 1. Capture baseline timestamp if not passed
+    const baselineSyslogTimestamp = options.baselineTimestamp !== undefined
+        ? options.baselineTimestamp
+        : await serviceNowClient.getLatestLogByMessage(page, COMPLETION_LOG_MESSAGE);
+
+    // 2. Navigate and trigger import
+    console.log(`\n=== Triggering Scheduled ${IMPORT_JOB_NAME} ===`);
+    await navigateToScheduledDataImports(page);
+
+    const gsftFrame = page.frameLocator('iframe[name="gsft_main"]');
+    const importLink = gsftFrame.getByRole('link', { name: `Open record: ${IMPORT_JOB_NAME}` }).first();
+    await importLink.waitFor({ state: 'visible', timeout: 50_000 });
+    await importLink.click();
+
+    const executeBtn = gsftFrame.getByRole('button', { name: 'Execute Now' }).first();
+    await executeBtn.waitFor({ state: 'visible', timeout: 50_000 });
+    await executeBtn.click();
+    console.log(`Triggered "Execute Now" for ${IMPORT_JOB_NAME}.`);
+
+    // 3. Wait for import completion in syslog
+    console.log(`\n=== Waiting for ${IMPORT_JOB_NAME} Completion in syslog ===`);
+    const completeLog = await serviceNowClient.waitForImportCompletion(page, {
+        baselineTimestamp: baselineSyslogTimestamp,
+        logMessage: COMPLETION_LOG_MESSAGE,
+        timeoutMs: options.timeoutMs || 1_500_000,
+        pollIntervalMs: options.pollIntervalMs || 15_000,
+    });
+    expect(completeLog, `${IMPORT_JOB_NAME} completion log should be found`).toBeTruthy();
+
+    // 4. Optional wait for post-import transform scripts
+    if (options.postWaitMs) {
+        console.log(`Waiting ${options.postWaitMs / 1000}s for post-import transform scripts...`);
+        await page.waitForTimeout(options.postWaitMs);
+    }
+
+    return { baselineTimestamp: baselineSyslogTimestamp, completeLog };
+}
 
 async function filterBitsightModules(page) {
-  await page.goto('/', { waitUntil: 'networkidle' });
-  
-  const allMenu = page.getByText('All').first();
-  await allMenu.click();
+    await page.goto('/', { waitUntil: 'networkidle' });
 
-  const pinButton = page.getByRole('button', { name: 'Pin All menu', exact: true }).first();
-  
-  if (await pinButton.isVisible()) {
-      await pinButton.click();
-  }
+    const allMenu = page.getByText('All').first();
+    await allMenu.click();
 
-  const filter = page.getByRole('textbox', { name: 'Enter search term to filter' });
-  await expect(filter).toBeVisible();
-  await filter.fill('bitsight');
-  await filter.press('Enter');
+    const pinButton = page.getByRole('button', { name: 'Pin All menu', exact: true }).first();
+
+    if (await pinButton.isVisible()) {
+        await pinButton.click();
+    }
+
+    const filter = page.getByRole('textbox', { name: 'Enter search term to filter' });
+    await expect(filter).toBeVisible();
+    await filter.fill('bitsight');
+    await filter.press('Enter');
 }
 
 // Centralized navigation helpers using .first() to prevent strict mode violations
@@ -817,7 +862,7 @@ test('TC-08: Verify CM-only company record tabs and tiles in ServiceNow', async 
 
     // 3. On Bitsight Security Ratings tab: Verify action buttons and dashboard tiles
     await ratingsTab.click();
-    await expect(ratingsTab).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 }).catch(() => {});
+    await expect(ratingsTab).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 }).catch(() => { });
 
     const expectedButtons = [
         'Enable Vendor Access',
@@ -2469,7 +2514,7 @@ test('TC 20: Verify VRM-only company record fields are read-only and verify tabs
 
     // 7. On Bitsight Portfolio Information tab: Verify fields are populated and not empty
     await portfolioTab.click();
-    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForLoadState('networkidle').catch(() => { });
 
     // Helper function to build dynamic field selectors ignoring hidden ServiceNow inputs
     const getFieldLocator = (fieldName) => {
@@ -2560,7 +2605,7 @@ test('TC 21: Verify CM-only company record tabs, buttons, and fields for bitsigh
 
     // 5. On Bitsight Security Ratings tab: Verify buttons and dashboard tiles
     await ratingsTab.click();
-    await expect(ratingsTab).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 }).catch(() => {});
+    await expect(ratingsTab).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 }).catch(() => { });
 
     // Action buttons: "Enable Vendor Access" is visible, admin buttons are not visible
     const enableVendorBtn = frame.getByRole('button', { name: 'Enable Vendor Access' }).first();
@@ -2601,7 +2646,7 @@ test('TC 21: Verify CM-only company record tabs, buttons, and fields for bitsigh
 
     // 6. On Bitsight Portfolio Information tab: Verify fields are populated and not empty
     await portfolioTab.click();
-    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForLoadState('networkidle').catch(() => { });
 
     const getFieldLocator = (fieldName) => {
         return frame.locator([
@@ -2697,25 +2742,25 @@ test('TC 22: Verify CM_VRM company record tabs, cards, tiles, and fields for bit
 
     const aboutRating = frame.getByText(/About Rating/i).first();
     if (await aboutRating.isVisible({ timeout: 10_000 }).catch(() => false)) {
-        await aboutRating.scrollIntoViewIfNeeded().catch(() => {});
+        await aboutRating.scrollIntoViewIfNeeded().catch(() => { });
     }
     await expect(aboutRating, 'About Rating card should be visible').toBeVisible({ timeout: 15_000 });
 
     const scoringImpact = frame.getByText(/Scoring\s*(Impact)?/i).first();
     if (await scoringImpact.isVisible({ timeout: 10_000 }).catch(() => false)) {
-        await scoringImpact.scrollIntoViewIfNeeded().catch(() => {});
+        await scoringImpact.scrollIntoViewIfNeeded().catch(() => { });
     }
     await expect(scoringImpact, 'Scoring card should be visible').toBeVisible({ timeout: 15_000 });
 
     const lifeCycleStage = frame.getByText(/Life Cycle Stage/i).first();
     if (await lifeCycleStage.isVisible({ timeout: 10_000 }).catch(() => false)) {
-        await lifeCycleStage.scrollIntoViewIfNeeded().catch(() => {});
+        await lifeCycleStage.scrollIntoViewIfNeeded().catch(() => { });
     }
     await expect(lifeCycleStage, 'Life Cycle Stage card should be visible').toBeVisible({ timeout: 15_000 });
 
     const pastDue = frame.getByText(/Past Due/i).first();
     if (await pastDue.isVisible({ timeout: 10_000 }).catch(() => false)) {
-        await pastDue.scrollIntoViewIfNeeded().catch(() => {});
+        await pastDue.scrollIntoViewIfNeeded().catch(() => { });
     }
     await expect(pastDue, 'Past Due card should be visible').toBeVisible({ timeout: 15_000 });
 
@@ -2743,37 +2788,37 @@ test('TC 22: Verify CM_VRM company record tabs, cards, tiles, and fields for bit
     // Dashboard tiles and graphs
     const overviewLink = frame.getByText(/View Company Overview/i).first();
     if (await overviewLink.isVisible({ timeout: 10_000 }).catch(() => false)) {
-        await overviewLink.scrollIntoViewIfNeeded().catch(() => {});
+        await overviewLink.scrollIntoViewIfNeeded().catch(() => { });
     }
     await expect(overviewLink, 'View Company Overview link should be visible').toBeVisible({ timeout: 15_000 });
 
     const timeseriesBox = frame.locator('.timeseries-box').first();
     if (await timeseriesBox.isVisible({ timeout: 10_000 }).catch(() => false)) {
-        await timeseriesBox.scrollIntoViewIfNeeded().catch(() => {});
+        await timeseriesBox.scrollIntoViewIfNeeded().catch(() => { });
     }
     await expect(timeseriesBox, 'Timeseries box should be visible').toBeVisible({ timeout: 15_000 });
 
     const vectorsBreakdown = frame.locator('#vectors-breakdown');
     if (await vectorsBreakdown.isVisible({ timeout: 10_000 }).catch(() => false)) {
-        await vectorsBreakdown.scrollIntoViewIfNeeded().catch(() => {});
+        await vectorsBreakdown.scrollIntoViewIfNeeded().catch(() => { });
     }
     await expect(vectorsBreakdown, 'Vectors breakdown should be visible').toBeVisible({ timeout: 15_000 });
 
     const ratingBreakdown = frame.locator('#rating-breakdown');
     if (await ratingBreakdown.isVisible({ timeout: 10_000 }).catch(() => false)) {
-        await ratingBreakdown.scrollIntoViewIfNeeded().catch(() => {});
+        await ratingBreakdown.scrollIntoViewIfNeeded().catch(() => { });
     }
     await expect(ratingBreakdown, 'Rating breakdown should be visible').toBeVisible({ timeout: 15_000 });
 
     const ratingHighlights = frame.getByText(/^Rating Highlights/i).first();
     if (await ratingHighlights.isVisible({ timeout: 10_000 }).catch(() => false)) {
-        await ratingHighlights.scrollIntoViewIfNeeded().catch(() => {});
+        await ratingHighlights.scrollIntoViewIfNeeded().catch(() => { });
     }
     await expect(ratingHighlights, 'Rating Highlights should be visible').toBeVisible({ timeout: 15_000 });
 
     // 7. On Bitsight Portfolio Information tab: Verify fields are populated and not empty
     await portfolioTab.click();
-    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForLoadState('networkidle').catch(() => { });
 
     const getFieldLocator = (fieldName) => {
         return frame.locator([
@@ -2812,7 +2857,63 @@ test('TC 22: Verify CM_VRM company record tabs, cards, tiles, and fields for bit
 });
 
 test('TC 23: Verify Rating and Risk Vector Alerts fields are read-only for bitsight_user', async ({ page }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(2000_000); // original timeout + 30 min for the import
+
+    const token = process.env.CMVRM_TOKEN;
+    if (!token) {
+        throw new Error('CM_TOKEN is not set in .env');
+    }
+    const bitsightClient = new BitsightApiClient({ token });
+    const serviceNowClient = new ServiceNowApiClient();
+    await page.goto(BASE_URL);
+
+    // // ---------- Step 0: run alerts import reconciliation first ----------
+    console.log('\n=== Step 0: Cleaning Up Existing Alerts & Incidents ===');
+    await clearAlerts(serviceNowClient);
+    await clearIncidents(serviceNowClient);
+
+    console.log('\n=== Step 0: Configuring Application Properties ===');
+    await configureApplicationProperties(page, {
+        ins_company: true,
+        mark_comp: true,
+        maxpropertyinc: 10,
+        inc_score: true,
+        incscoredrop: 5,
+        critcal_alert_inc: true,
+        inc_warn_alert: true,
+        assign_incident: 'user',
+        user: 'abel tuter',
+        caller: 'abraham lincoln',
+    });
+
+    await triggerAndWaitForAlertsImport(page, serviceNowClient);
+
+    const snCompanyGuids = await serviceNowClient.getBitsightVendorGuids();
+    console.log(`Found ${snCompanyGuids.length} active Bitsight companies in ServiceNow core_company.`);
+    const alertsGroundTruth = await bitsightClient.getAlertsCount({
+        portfolioGuids: snCompanyGuids.map(c => c.guid),
+    });
+    const totalAlertsCount = typeof alertsGroundTruth === 'number' ? alertsGroundTruth : (alertsGroundTruth.count ?? alertsGroundTruth);
+    console.log(`Bitsight Alerts Ground Truth Count (matching ServiceNow portfolio): ${totalAlertsCount}`);
+
+    const snAlertsList = await serviceNowClient.getTableRecords('x_bisit_vrm_bitsight_alerts', {
+        sysparm_limit: 10000,
+        fields: 'sys_id',
+    });
+    const snAlertsCount = snAlertsList.length;
+    console.log(`ServiceNow alerts table record count: ${snAlertsCount}`);
+
+    console.table({
+        'Bitsight Alerts Ground Truth Count': totalAlertsCount,
+        'Actual ServiceNow Alerts Table Count': snAlertsCount,
+        'Difference': Math.abs(snAlertsCount - totalAlertsCount),
+    });
+
+    expect(
+        snAlertsCount,
+        `Expected ServiceNow alerts table count (${snAlertsCount}) to match Bitsight Alerts ground truth count (${totalAlertsCount})`
+    ).toBe(totalAlertsCount);
+
 
     const regularUser = process.env.SN_REGULAR_USER || 'bitsight_user';
     const regularPass = process.env.SN_REGULAR_PASS || 'Bitsight@123';
@@ -2822,6 +2923,7 @@ test('TC 23: Verify Rating and Risk Vector Alerts fields are read-only for bitsi
 
     // 2. Navigate to Rating and Risk Vector Alerts via filter navigator
     await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.getByText('All').first().click();
     const searchBox23 = page.getByRole('textbox', { name: 'Enter search term to filter' });
     await searchBox23.click();
     await searchBox23.fill('bitsight');
@@ -2881,6 +2983,7 @@ test('TC 24: Verify Incidents short_description field is read-only for bitsight_
 
     // 2. Navigate to Incidents via filter navigator
     await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.getByText('All').first().click();
     const searchBox24 = page.getByRole('textbox', { name: 'Enter search term to filter' });
     await searchBox24.click();
     await searchBox24.fill('bitsight');
