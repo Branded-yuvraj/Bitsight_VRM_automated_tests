@@ -739,7 +739,7 @@ test('TC 008 Imported companies are marked as vendors when Mark as Vendor is ena
 });
 
 test('TC 009 Bitsight Portfolio - Security Rating field is write-protected via API for restricted user', async ({ page }) => {
-    test.setTimeout(120_000); // original timeout + 30 min for the import
+    test.setTimeout(2000_000); // original timeout + 30 min for the import
 
     const token = process.env.CM_TOKEN;
     if (!token) {
